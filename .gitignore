@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Editor cruft
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs / tmp
+*.log
+*.tmp
+*.bak
+
+# Test artifacts
+.coverage
+htmlcov/
+
+# Local hermes state spillover (should never end up here, but belt+braces)
+state.db
+state.db-shm
+state.db-wal
+audit.jsonl
+
+# OMC session state (auto-created by oh-my-claudecode HUD when cwd is a session)
+.omc/
