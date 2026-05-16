@@ -40,7 +40,7 @@ Make Hermes Agent PAI-ecosystem-aware via 7 skills + 3 cron jobs. Replace `pai-p
 ## Working rules
 
 - Each SKILL.md ≤120 LOC. Concise. Trigger phrases + intent + commands + caveats.
-- Skills do NOT invoke each other. Hermes orchestrates between skills.
+- Skills MAY recommend chaining to other skills via prose hints in their body (e.g. "after this, call pai-pulse to notify"). The agent — Hermes — decides whether to honor the hint. Skills do NOT directly invoke each other (no sub-process call between skills). Chains form a directed acyclic graph: pai-watch → pai-pulse, pai-cost-tracker → pai-pulse, pai-statusline-banner → {pai-doctor, pai-cost-tracker, pai-pulse}. No cycles. Hermes is always the orchestrator; skills are leaves.
 - Cron files match Hermes built-in scheduler format (see `~/.hermes/cron/`).
 - `install.sh` is idempotent — re-run safely.
 - Changes to skill content do NOT require Hermes restart unless skill cache is on (check `~/.hermes/config.yaml`).

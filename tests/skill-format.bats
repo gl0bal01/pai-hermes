@@ -58,18 +58,26 @@ SKILLS=(omc pai-pulse pai-watch pai-doctor pai-accept pai-cost-tracker pai-statu
   done
 }
 
-@test "all 3 cron yaml files present" {
-  [ -f "$REPO/cron/pai-watch.yaml" ]
-  [ -f "$REPO/cron/pai-cost-tracker.yaml" ]
-  [ -f "$REPO/cron/pai-statusline-banner.yaml" ]
+@test "cron/README.md exists and documents 3 jobs" {
+  [ -f "$REPO/cron/README.md" ]
+  grep -qE "^### 1\. pai-watch" "$REPO/cron/README.md"
+  grep -qE "^### 2\. pai-cost-tracker" "$REPO/cron/README.md"
+  grep -qE "^### 3\. pai-statusline-banner" "$REPO/cron/README.md"
 }
 
-@test "each cron yaml has name + schedule + task fields" {
-  for f in "$REPO"/cron/*.yaml; do
-    grep -qE "^name:\s*\S+" "$f"
-    grep -qE "^schedule:" "$f"
-    grep -qE "^task:" "$f"
-  done
+@test "cron/ no longer ships yaml files (0.1.1 pivot to Hermes-managed JSON)" {
+  ! ls "$REPO"/cron/*.yaml 2>/dev/null
+}
+
+@test "bin/pai-accept-guard exists + executable" {
+  [ -x "$REPO/bin/pai-accept-guard" ] || chmod +x "$REPO/bin/pai-accept-guard"
+  [ -x "$REPO/bin/pai-accept-guard" ]
+}
+
+@test "pai-accept-guard refuses non-SSH invocation (exit 77)" {
+  unset SSH_TTY SSH_CONNECTION SSH_CLIENT PAI_LOCAL_OVERRIDE
+  run "$REPO/bin/pai-accept-guard" fake-id
+  [ "$status" -eq 77 ]
 }
 
 @test "install.sh is executable" {

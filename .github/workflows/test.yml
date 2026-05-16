@@ -1,0 +1,37 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats jq python3 python3-pip shellcheck
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: shellcheck install + uninstall + guard
+        run: shellcheck install.sh uninstall.sh bin/pai-accept-guard
+
+      - name: bats — skill format
+        run: bats tests/skill-format.bats
+
+      - name: pytest — cost_check.py
+        run: pytest tests/test_cost_check.py -v
+
+      - name: pai-accept-guard refuses non-SSH
+        run: |
+          chmod +x bin/pai-accept-guard
+          set +e
+          ./bin/pai-accept-guard fake-id
+          rc=$?
+          set -e
+          test "$rc" = "77" || { echo "expected exit 77 (EX_NOPERM), got $rc"; exit 1; }

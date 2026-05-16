@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# pai-accept-guard — SSH-only + flock + atomic paths.env mutation
+#
+# The pai-accept skill describes this flow in markdown, but Hermes is an
+# LLM-driven agent: it could be persuaded to bypass markdown rules. This
+# wrapper enforces the security model in shell, not prose.
+#
+# Usage:
+#   pai-accept-guard <proposal-id>
+#
+# Exit codes:
+#   0   accepted
+#   1   generic failure
+#   2   bad arguments / invalid proposal
+#   65  EX_DATAERR — invalid SHA / repo name
+#   75  EX_TEMPFAIL — flock timeout (another pai-accept in flight)
+#   77  EX_NOPERM — not running under SSH (and PAI_LOCAL_OVERRIDE unset)
+#
+# shellcheck shell=bash
+set -uo pipefail
+
+PROG="pai-accept-guard"
+
+die() { echo "${PROG}: $*" >&2; exit "${2:-1}"; }
+
+# === 1. SSH-only enforcement ==============================================
+# Allow override only via explicit env, never via CLI flag (harder for LLM
+# agents to invoke accidentally).
+if [[ -z "${SSH_TTY:-}${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]] && \
+   [[ -z "${PAI_LOCAL_OVERRIDE:-}" ]]; then
+  die "refused: not running under SSH. Set PAI_LOCAL_OVERRIDE=1 to bypass for local dev." 77
+fi
+
+# === 2. Args ==============================================================
+[[ $# -ge 1 ]] || die "usage: ${PROG} <proposal-id>" 2
+ID="$1"
+[[ "$ID" =~ ^[A-Za-z0-9._:T-]+$ ]] || die "invalid proposal id: $ID" 65
+
+PROPOSALS_DIR="${PAI_PROPOSALS_DIR:-/var/lib/pai-anywhere/proposals}"
+PROPOSAL="${PROPOSALS_DIR}/${ID}.json"
+[[ -f "$PROPOSAL" ]] || die "proposal not found: $PROPOSAL" 2
+
+PATHS_ENV="${PAI_PATHS_ENV:-/etc/pai/paths.env}"
+[[ -f "$PATHS_ENV" ]] || die "paths.env missing: $PATHS_ENV"
+[[ -w "$PATHS_ENV" ]] || die "paths.env not writable: $PATHS_ENV"
+
+# === 3. Parse proposal ====================================================
+command -v jq >/dev/null 2>&1 || die "jq required but not on PATH"
+
+REPO="$(jq -r .repo "$PROPOSAL")"
+SHA="$(jq -r .targetSha "$PROPOSAL")"
+LOG="$(jq -r .commits "$PROPOSAL")"
+
+[[ -n "$REPO" && "$REPO" != "null" ]] || die "proposal missing .repo" 65
+[[ "$REPO" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid repo name: $REPO" 65
+[[ -n "$SHA" && "$SHA" != "null" ]] || die "proposal missing .targetSha" 65
+[[ "$SHA" =~ ^[a-f0-9]{7,40}$ ]] || die "invalid SHA format: $SHA" 65
+
+KEY="PAI_$(echo "$REPO" | tr 'a-z-' 'A-Z_')_SHA"
+
+# === 4. Atomic paths.env update under flock ===============================
+LOCK="${PAI_ACCEPT_LOCK:-/tmp/pai-accept.lock}"
+exec 9>"$LOCK" || die "cannot open lock: $LOCK"
+flock -w "${PAI_ACCEPT_LOCK_TIMEOUT:-30}" 9 || die "another pai-accept in flight (lock timeout)" 75
+
+TMP="$(mktemp "${PATHS_ENV}.XXXXXX")"
+trap 'rm -f "${TMP:-}"' EXIT
+grep -v "^${KEY}=" "$PATHS_ENV" > "$TMP" || true
+printf '%s=%s\n' "$KEY" "$SHA" >> "$TMP"
+
+# Preserve permissions of original
+chmod --reference="$PATHS_ENV" "$TMP" 2>/dev/null || chmod 644 "$TMP"
+mv "$TMP" "$PATHS_ENV"   # atomic on same filesystem
+trap - EXIT
+
+echo "${KEY}=${SHA}"
+
+# === 5. Mark proposal accepted (also atomic via tmp+mv) ===================
+TS="$(date -u +%FT%TZ)"
+PTMP="$(mktemp "${PROPOSAL}.XXXXXX")"
+trap 'rm -f "${PTMP:-}"' EXIT
+jq --arg ts "$TS" '.status="accepted" | .acceptedAt=$ts' "$PROPOSAL" > "$PTMP" && mv "$PTMP" "$PROPOSAL"
+trap - EXIT
+
+# === 6. Optional arc review markdown =====================================
+ARC_DIR="${PAI_COLLAB_DIR:-}/projects/arc/reviews"
+if [[ -n "${PAI_COLLAB_DIR:-}" && -d "$ARC_DIR" && -w "$ARC_DIR" ]]; then
+  SHA7="${SHA:0:7}"
+  TODAY="$(date -u +%F)"
+  REVIEW="${ARC_DIR}/${TODAY}-pai-watch-${REPO}-${SHA7}.md"
+  cat > "$REVIEW" <<EOF
+# Upstream bump review — ${REPO} @ ${SHA7}
+
+**Proposal**: ${ID}
+**Repo**: ${REPO}
+**Target SHA**: ${SHA}
+**Accepted**: ${TS}
+**Source**: pai-watch auto-detect
+
+## Commits
+
+\`\`\`
+${LOG}
+\`\`\`
+
+## Review
+
+Auto-generated via \`pai-accept-guard ${ID}\`. Human approval recorded as SSH session on VPS.
+EOF
+  echo "$REVIEW"
+fi
+
+echo "accepted: ${ID} (${REPO} @ ${SHA:0:7})"

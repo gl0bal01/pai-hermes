@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 # pai-hermes installer — idempotent wiring into Hermes Agent config
+#
+# What this does (0.1.1):
+#   1. Symlink pai-hermes/skills/ into ~/.hermes/skills/pai-hermes
+#   2. Patch ~/.hermes/config.yaml: add skills.external_dirs entry (pyyaml-based,
+#      not regex). Backup .bak. Validate YAML after patch; restore from .bak if
+#      validation fails (rollback).
+#   3. Print instructions for registering 3 cron jobs via Hermes itself
+#      (cron is JSON-based; see cron/README.md for why we don't symlink).
+#
 # shellcheck shell=bash
 set -euo pipefail
 
@@ -7,82 +16,104 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_SKILLS_DIR="$HERMES_HOME/skills/pai-hermes"
-HERMES_CRON_DIR="$HERMES_HOME/cron"
 
 echo "[pai-hermes install] repo=$REPO_DIR"
 echo "[pai-hermes install] target=$HERMES_HOME"
 
-# 0. Sanity
+# === 0. Sanity ============================================================
 [[ -d "$HERMES_HOME" ]] || { echo "ERROR: Hermes not installed at $HERMES_HOME" >&2; exit 1; }
 [[ -f "$HERMES_CONFIG" ]] || { echo "ERROR: $HERMES_CONFIG missing" >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 required" >&2; exit 1; }
+python3 -c "import yaml" 2>/dev/null || {
+  echo "ERROR: PyYAML required (pip install pyyaml). Hermes ships with PyYAML; check your venv." >&2
+  exit 1
+}
 
-# 1. Symlink skills/ into Hermes skills dir
+# === 1. Symlink skills ====================================================
 echo "[pai-hermes install] symlinking skills..."
 mkdir -p "$(dirname "$HERMES_SKILLS_DIR")"
-[[ -L "$HERMES_SKILLS_DIR" ]] && rm "$HERMES_SKILLS_DIR"
-[[ -e "$HERMES_SKILLS_DIR" ]] && { echo "ERROR: $HERMES_SKILLS_DIR exists and is not a symlink" >&2; exit 1; }
+if [[ -L "$HERMES_SKILLS_DIR" ]]; then
+  rm "$HERMES_SKILLS_DIR"
+fi
+if [[ -e "$HERMES_SKILLS_DIR" ]]; then
+  echo "ERROR: $HERMES_SKILLS_DIR exists and is not a symlink" >&2
+  exit 1
+fi
 ln -s "$REPO_DIR/skills" "$HERMES_SKILLS_DIR"
 echo "  $HERMES_SKILLS_DIR -> $REPO_DIR/skills"
 
-# 2. Symlink cron entries
-echo "[pai-hermes install] symlinking cron entries..."
-mkdir -p "$HERMES_CRON_DIR"
-for cron_file in "$REPO_DIR"/cron/*.yaml; do
-  [[ -f "$cron_file" ]] || continue
-  base="$(basename "$cron_file")"
-  target="$HERMES_CRON_DIR/$base"
-  [[ -L "$target" ]] && rm "$target"
-  [[ -e "$target" ]] && { echo "  WARN: $target exists, skipping" >&2; continue; }
-  ln -s "$cron_file" "$target"
-  echo "  $target -> $cron_file"
-done
+# === 2. Patch config.yaml (pyyaml + validate-rollback) ===================
+echo "[pai-hermes install] patching config.yaml external_dirs..."
+BACKUP="${HERMES_CONFIG}.bak"
+cp "$HERMES_CONFIG" "$BACKUP"   # always backup before patch
+echo "  backup: $BACKUP"
 
-# 3. Edit config.yaml: append external_dirs entry if missing
-echo "[pai-hermes install] checking config.yaml external_dirs..."
-if grep -qE "^\s*-\s*${HERMES_SKILLS_DIR}\s*$" "$HERMES_CONFIG"; then
-  echo "  external_dirs already includes $HERMES_SKILLS_DIR"
-else
-  echo "  patching config.yaml (backup: $HERMES_CONFIG.bak)"
-  cp -n "$HERMES_CONFIG" "$HERMES_CONFIG.bak" 2>/dev/null || true
-  # idempotent: add via marker comments
-  python3 - "$HERMES_CONFIG" "$HERMES_SKILLS_DIR" <<'PYEOF'
-import sys, re, pathlib
-cfg_path = pathlib.Path(sys.argv[1])
-skill_dir = sys.argv[2]
-text = cfg_path.read_text()
-# find skills.external_dirs block
-m = re.search(r'^skills:\s*\n((?:^[ \t]+.*\n)+)', text, re.MULTILINE)
-if not m:
-    # append a new skills block
-    text = text.rstrip() + f"\nskills:\n  external_dirs:\n    - {skill_dir}\n  template_vars: true\n"
-else:
-    block = m.group(1)
-    if f'- {skill_dir}' in block:
+if PYYAML_OK=$(HERMES_CONFIG="$HERMES_CONFIG" SKILL_DIR="$HERMES_SKILLS_DIR" python3 <<'PYEOF'
+import os, sys, yaml, pathlib
+
+cfg_path = pathlib.Path(os.environ["HERMES_CONFIG"])
+skill_dir = os.environ["SKILL_DIR"]
+
+raw = cfg_path.read_text()
+try:
+    data = yaml.safe_load(raw) or {}
+except yaml.YAMLError as exc:
+    print(f"YAML_PARSE_FAIL: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+if not isinstance(data, dict):
+    print("YAML_ROOT_NOT_MAPPING", file=sys.stderr)
+    sys.exit(2)
+
+skills = data.setdefault("skills", {})
+if not isinstance(skills, dict):
+    print("SKILLS_KEY_NOT_MAPPING", file=sys.stderr)
+    sys.exit(2)
+
+ext = skills.get("external_dirs")
+if ext is None:
+    skills["external_dirs"] = [skill_dir]
+elif isinstance(ext, list):
+    if skill_dir not in ext:
+        ext.append(skill_dir)
+    else:
+        print("ALREADY_PRESENT")
         sys.exit(0)
-    # find external_dirs line
-    new_block = re.sub(
-        r'^(\s*external_dirs:\s*)(\[\s*\]|\n)',
-        lambda mm: f"{mm.group(1)}\n    - {skill_dir}" + ("\n" if mm.group(2) == '\n' else ""),
-        block,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    if new_block == block:
-        # append as new list item below existing
-        new_block = re.sub(
-            r'^(\s*external_dirs:[^\n]*\n)',
-            lambda mm: mm.group(1) + f"    - {skill_dir}\n",
-            block,
-            count=1,
-            flags=re.MULTILINE,
-        )
-    text = text.replace(block, new_block)
-cfg_path.write_text(text)
+else:
+    print("EXTERNAL_DIRS_NOT_LIST", file=sys.stderr)
+    sys.exit(2)
+
+skills.setdefault("template_vars", True)
+
+new_yaml = yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True)
+cfg_path.write_text(new_yaml)
+print("PATCHED")
 PYEOF
-  echo "  added: external_dirs += $HERMES_SKILLS_DIR"
+); then
+  case "$PYYAML_OK" in
+    PATCHED)        echo "  added: external_dirs += $HERMES_SKILLS_DIR" ;;
+    ALREADY_PRESENT) echo "  external_dirs already includes $HERMES_SKILLS_DIR (no change)"
+                    rm "$BACKUP"  # nothing changed, no need for backup
+                    ;;
+    *) echo "  unexpected python output: $PYYAML_OK" >&2 ;;
+  esac
+else
+  echo "ERROR: config.yaml patch failed. Restoring from $BACKUP." >&2
+  mv "$BACKUP" "$HERMES_CONFIG"
+  exit 1
 fi
 
-# 4. Validate skills format
+# === 2b. Post-patch validation =============================================
+if [[ -f "$BACKUP" ]]; then
+  if ! python3 -c "import yaml,sys; yaml.safe_load(open('$HERMES_CONFIG').read())" 2>/dev/null; then
+    echo "ERROR: patched config.yaml fails YAML parse. Rolling back from $BACKUP." >&2
+    mv "$BACKUP" "$HERMES_CONFIG"
+    exit 1
+  fi
+  echo "  validated: post-patch YAML parses OK"
+fi
+
+# === 3. Validate skills format ============================================
 echo "[pai-hermes install] validating SKILL.md frontmatter..."
 if command -v bats >/dev/null 2>&1; then
   bats "$REPO_DIR/tests/skill-format.bats" || { echo "ERROR: skill format validation failed" >&2; exit 1; }
@@ -90,16 +121,39 @@ else
   echo "  WARN: bats not installed, skipping validation"
 fi
 
-# 5. Probe Hermes can reach skills
-echo ""
-echo "[pai-hermes install] DONE."
-echo ""
-echo "Next steps:"
-echo "  1. Restart Hermes:           pkill hermes && hermes"
-echo "  2. Verify skills loaded:     hermes -> /skills | grep pai"
-echo "  3. Verify cron registered:   hermes -> /cron list"
-echo "  4. Run pai-doctor:           hermes -> 'pai doctor'"
-echo "  5. Wire PAI canonical Packs (optional, gives 45 PAI skills):"
-echo "     edit $HERMES_CONFIG: skills.external_dirs += <PAI canonical Packs path>"
-echo ""
-echo "Uninstall: $REPO_DIR/uninstall.sh"
+# === 4. Cron registration instructions ====================================
+cat <<EOF
+
+[pai-hermes install] DONE.
+
+═══════════════════════════════════════════════════════════════════
+NEXT STEP: register cron jobs via Hermes (NOT symlinked files).
+
+0.1.1 corrects 0.1.0's wrong assumption that ~/.hermes/cron/*.yaml
+is loaded automatically. Real Hermes cron is JSON-based, managed by
+Hermes's cronjob tool, NOT by filesystem drops.
+
+Open a Hermes session (TUI/Telegram/etc) and run the 3 registration
+prompts documented in:
+
+  $REPO_DIR/cron/README.md
+
+After registration, verify:
+
+  jq '.jobs[] | {name, schedule: .schedule.expr, enabled}' \\
+    ~/.hermes/cron/jobs.json
+
+Expected: 3 jobs (pai-watch, pai-cost-tracker, pai-statusline-banner).
+═══════════════════════════════════════════════════════════════════
+
+Other follow-ups:
+  - Restart Hermes:           pkill hermes && hermes
+  - Verify skills loaded:     hermes -> /skills | grep pai
+  - Run pai-doctor:           hermes -> 'pai doctor'
+  - Wire PAI canonical Packs (optional, gives 45 PAI skills):
+    edit $HERMES_CONFIG: skills.external_dirs += <PAI canonical Packs path>
+  - For pai-accept SSH-only enforcement, symlink the guard:
+      ln -sf "$REPO_DIR/bin/pai-accept-guard" /usr/local/bin/pai-accept-guard
+
+Uninstall: $REPO_DIR/uninstall.sh
+EOF

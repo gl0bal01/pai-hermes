@@ -55,28 +55,26 @@ accepted: <id> (<repo> @ <sha7>)
 
 ## Execution
 
-Via Hermes terminal toolset, SSH-only. If invoked from any non-SSH context, skill MUST refuse and return error.
+**Always invoke the guard wrapper, never the inline commands.** The wrapper enforces SSH-only + flock-based atomicity in shell — markdown rules in SKILL.md are advisory; the guard is the actual security boundary.
 
 ```bash
-# Pre-flight
-[[ -n "${SSH_TTY:-}" ]] || { echo "SSH-only"; exit 1; }
+# Canonical invocation:
+pai-accept-guard <proposal-id>
 
-# Pin
-proposal="$PAI_PROPOSALS_DIR/${ID}.json"
-repo=$(jq -r .repo "$proposal")
-sha=$(jq -r .targetSha "$proposal")
-key="PAI_$(echo "$repo" | tr a-z- A-Z_)_SHA"
-
-# Update paths.env
-tmp=$(mktemp)
-grep -v "^${key}=" /etc/pai/paths.env > "$tmp"
-echo "${key}=${sha}" >> "$tmp"
-mv "$tmp" /etc/pai/paths.env
-
-# Mark accepted
-jq --arg ts "$(date -u +%FT%TZ)" '.status="accepted" | .acceptedAt=$ts' \
-  "$proposal" > "${proposal}.tmp" && mv "${proposal}.tmp" "$proposal"
+# If installed via install.sh, symlink the guard for system-wide use:
+sudo ln -sf $PAI_PROJET_ROOT/pai-hermes/bin/pai-accept-guard /usr/local/bin/pai-accept-guard
 ```
+
+The guard (`bin/pai-accept-guard` in this repo) enforces:
+
+1. **SSH-only** — refuses unless `SSH_TTY`, `SSH_CONNECTION`, or `SSH_CLIENT` is set. Exit 77 (EX_NOPERM) otherwise. Override only via `PAI_LOCAL_OVERRIDE=1` env (never via CLI flag).
+2. **Input validation** — proposal id, repo name, and SHA must match strict regex. Exit 65 (EX_DATAERR) on mismatch.
+3. **flock** — exclusive lock on `${PAI_ACCEPT_LOCK:-/tmp/pai-accept.lock}` with 30s timeout (configurable via `PAI_ACCEPT_LOCK_TIMEOUT`). Exit 75 (EX_TEMPFAIL) if another accept in flight.
+4. **Atomic paths.env mutation** — write to tmp file (same dir), preserve permissions, then `mv` (atomic on same filesystem).
+5. **Atomic proposal status update** — same tmp+mv pattern, prevents partial writes.
+6. **Optional arc review** — only if `$PAI_COLLAB_DIR/projects/arc/reviews/` exists and writable. Skipped silently otherwise.
+
+If you really want raw bash inline (NOT recommended — bypasses guard), see source: `bin/pai-accept-guard`.
 
 ## Rollback
 

@@ -26,7 +26,7 @@ sudo apt install -y bats jq python3 git curl flock
 ## Quick install (local dev)
 
 ```bash
-git clone https://github.com/<you>/pai-hermes ~/pai-hermes
+git clone https://github.com/gl0bal01/pai-hermes ~/pai-hermes
 cd ~/pai-hermes
 chmod +x install.sh
 ./install.sh
@@ -56,7 +56,7 @@ sudo -u pai hermes --version
 sudo -u pai bash -lc 'npm install -g oh-my-claudecode'
 
 # 3. Clone pai-hermes
-sudo git clone https://github.com/<you>/pai-hermes /opt/pai-hermes
+sudo git clone https://github.com/gl0bal01/pai-hermes /opt/pai-hermes
 sudo chown -R pai:pai /opt/pai-hermes
 
 # 4. Install pai-hermes wiring as pai user

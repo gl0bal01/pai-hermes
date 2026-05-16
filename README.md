@@ -30,7 +30,7 @@ Plugs **Hermes** into the **PAI ecosystem** (OMC, pai-anywhere, PAI canonical):
 ## Install
 
 ```bash
-git clone https://github.com/<you>/pai-hermes ~/.hermes/pai-hermes
+git clone https://github.com/gl0bal01/pai-hermes ~/.hermes/pai-hermes
 cd ~/.hermes/pai-hermes
 ./install.sh    # edits ~/.hermes/config.yaml + symlinks cron/ + tests skills
 ```

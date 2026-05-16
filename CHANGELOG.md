@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.1.1] — 2026-05-16 — Review-driven fixes
+
+Addresses external code review of 0.1.0. All 5 "must fix" items + 6 of 7 "missing" items resolved. One deferred (Anthropic admin-API spend fetch) with honest removal from output schema.
+
+### Fixed
+
+- **`tools/cost_check.py` pct() zero-falsy bug**: `d.get("used_percentage") or d.get("utilization") or 0` silently swapped a genuine `0%` for `utilization` or `0`. Now uses explicit `None` checks. Added type coercion + non-dict guard. (Review item #1.)
+- **`install.sh` YAML patcher**: regex-on-YAML replaced with PyYAML (`yaml.safe_load` + `yaml.safe_dump`). Idempotent. Pre-edit backup `.bak` + post-edit YAML parse validation; **rollback to backup on any parse failure**. (Review items #2, #7 — "no rollback in install.sh".)
+- **Cron pivot**: deleted 3 yaml files (`cron/pai-*.yaml`). Hermes cron is JSON-based (`~/.hermes/cron/jobs.json`), managed by Hermes's own `cronjob` tool — yaml files were never the integration point. Replaced with `cron/README.md` documenting the 3 jobs as manual registration prompts to run inside a Hermes session. (Review item #4 — biggest correctness gap.)
+- **`bin/pai-accept-guard`** (NEW, 90 LOC bash): shell-level enforcer of SSH-only constraint that was previously markdown-only. Refuses non-SSH invocation with `exit 77` (EX_NOPERM). Adds: input validation regex (`exit 65` EX_DATAERR), `flock` with timeout (`exit 75` EX_TEMPFAIL on contention), atomic `paths.env` mutation (write-tmp-then-`mv`), atomic proposal status update. Override only via env (`PAI_LOCAL_OVERRIDE=1`), never CLI flag. (Review items #5, "race condition in pai-accept".)
+- **`skills/pai-accept/SKILL.md`**: now mandates invoking `pai-accept-guard` instead of inline bash. Markdown rules remain advisory; guard is the actual security boundary.
+- **Skill-chaining contradiction in `CLAUDE.md`**: previous rule "Skills do NOT invoke each other" contradicted statusline-banner/watch/cost-tracker chaining patterns. Clarified: skills MAY recommend chains via prose hints; Hermes is always the orchestrator; the graph is a strict DAG (no cycles). (Review item #3.)
+- **Placeholder URLs**: `README.md` + `docs/INSTALL.md` `<you>` → `gl0bal01`. (Review item "README has placeholder URL".)
+
+### Added
+
+- **`tests/test_cost_check.py`** (NEW, 27 pytest tests): pct() edge cases (zero, None, string, garbage, non-dict), extract_metrics partial/empty/zero-division, classify alert+block precedence, compose_voice silence-when-clean + staleness-warning, read_cache invalid-JSON, cache_age missing-file. (Review item "no unit tests".)
+- **`tools/cost_check.py` staleness check**: cache mtime read; output schema gains `cache_age_seconds` + `cache_stale` (boolean); `compose_voice` prepends "usage cache stale by N minutes" when threshold (15 min per SKILL.md) crossed. (Review item "no staleness check".)
+- **`.github/workflows/test.yml`** (NEW): CI runs `shellcheck` (install/uninstall/guard), `bats` (skill-format suite), `pytest` (cost_check), and a smoke test asserting `pai-accept-guard` returns 77 in non-SSH context. Triggered on push to main + PRs. (Review item "no CI".)
+- **`tests/skill-format.bats`**: new tests verifying cron/README.md documents the 3 jobs, no yaml files remain, and pai-accept-guard refuses non-SSH (exit 77).
+
+### Removed
+
+- **`api_spend_month_usd`** from `DEFAULT_THRESHOLDS` + output schema. 0.1.0 declared it but never computed (admin-API path not implemented). Honest removal until admin-key fetch ships. (Review item "api_spend_month_usd never computed".)
+- 3 obsolete cron yaml files (replaced by cron/README.md).
+
+### Changed
+
+- `uninstall.sh`: matches `install.sh` — pyyaml-based external_dirs removal + validate + rollback on parse failure. Reminds user to delete cron jobs via Hermes (not filesystem) since cron was never symlinked.
+- `tools/cost_check.py` `extract_metrics`: defensive `or {}` on every dict access; zero-division-safe extra_credits percentage.
+
+### Test status
+
+- 27/27 pytest (`tests/test_cost_check.py`) ✓
+- 15/15 bats (`tests/skill-format.bats`) ✓
+- shellcheck clean on `install.sh`, `uninstall.sh`, `bin/pai-accept-guard` ✓
+- `pai-accept-guard fake-id` (no SSH env) → exit 77 ✓
+
+### Known limitations (still in 0.1.1)
+
+- Hermes cron job registration is **manual prompt-based** (see `cron/README.md`). 0.2.0 candidate: ship `cron/install-cron-jobs.sh` using `hermes cronjob create ...` once flag set is verified across versions.
+- Anthropic admin-API spend fetch deferred — `api_spend` removed from schema rather than stubbed.
+- Live Hermes integration runtime still unverified (skills written, never loaded by an actual Hermes session).
+
 ## [0.1.0] — 2026-05-16 — Initial scaffold
 
 Initial scaffold drafted in same session as `pai-projet` 540 LOC bash router. Concluded `pai-projet` overlapped Hermes 70% and pivoted to this bridge approach.
