@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.1.2] — 2026-05-31 — Security review hardening
+
+Addresses full-tree security review of 0.1.1. 2 HIGH + 5 MEDIUM + 5 LOW + 1 INFO findings resolved. No CRITICAL.
+
+### Fixed (HIGH)
+
+- **`bin/pai-accept-guard` heredoc command injection (M4)**: the arc review markdown writer used an unquoted heredoc `<<EOF`, so `${LOG}` (a `git log --pretty='%h %s'` blob from fetched upstream refs) was shell-expanded before write. A malicious upstream commit subject like `$(cmd)` would execute at write time. Replaced with quoted `printf` per-line — `$LOG` is now treated as opaque text. Fence changed from ``` to `~~~` to reduce markdown-fence-break risk. New bats regression `pai-accept-guard treats proposal .commits as opaque`.
+- **`install.sh` rollback gap (H1)**: the `ALREADY_PRESENT` branch deleted the backup before the post-patch YAML validate block, leaving rollback impossible if the on-disk config was malformed pre-run. Unexpected patcher output was non-fatal. Now: validate-then-delete in every branch; any unexpected output is a fatal rollback.
+- **`bin/pai-accept-guard` env-var path trust under sudo (H2)**: with `EUID=0`, `PAI_PATHS_ENV=/etc/shadow` (or `PAI_PROPOSALS_DIR`/`PAI_COLLAB_DIR`) would have caused arbitrary-file overwrite. Now refuses non-canonical paths when running as root; `readlink -f` symlink-escape check on `paths.env`. Documented in `docs/INSTALL.md` that the guard must not be invoked via `sudo -E`.
+
+### Fixed (MEDIUM)
+
+- **`docs/INSTALL.md` `curl | bash` (M1)**: VPS install steps replaced with download → `sha256sum -c` → `less` review → `bash` pattern for both pai-anywhere and Hermes installers.
+- **`bin/pai-accept-guard` lock-file symlink race (M2)**: `/tmp/pai-accept.lock` default replaced with `${XDG_RUNTIME_DIR:-/run/user/$EUID}/pai-accept/lock` (mode 700). Guard refuses to open the lock if the path is already a symlink (anti-truncate). New bats regression.
+- **`bin/pai-accept-guard` trap chain (M3)**: switched from per-step `trap '... rm $TMP' EXIT; trap - EXIT` pattern to a single `CLEANUP=()` accumulator + exit-code-preserving cleanup function. Removes orphan-tempfile risk on failure between trap toggles.
+- **`tools/cost_check.py` snapshot symlink follow (M5)**: `log_path.open("a")` followed symlinks under cron, allowing append to arbitrary file. Now: `Path.resolve()` + parent-directory allowlist under `~/.hermes/`, `O_NOFOLLOW` open. Snapshot dir created mode 700. New bats regression `cost_check.py refuses --snapshot-log outside ~/.hermes/`.
+
+### Fixed (LOW)
+
+- **`install.sh` symlink TOCTOU (L1)**: `[[ -L ]] then rm then [[ -e ]]` race replaced with `ln -snf` (atomic) + non-symlink pre-check.
+- **`uninstall.sh` `cp` follows symlinks (L2)**: refuses if `$BACKUP` is a pre-existing symlink; `cp --no-dereference --remove-destination`. Also pre-checks `$HERMES_CONFIG` is not a symlink.
+- **`skills/pai-pulse/SKILL.md` JSON construction guidance (L3)**: added `## Safety — JSON construction` section mandating `jq -n --arg` with explicit wrong/right examples; warns that `-d "{\"message\":\"$msg\"}"` re-evaluates `$()`/backticks/`${}` as shell.
+- **`docs/INSTALL.md` regex-on-YAML antipattern (L4)**: the "Wire PAI canonical Packs" step taught the regex pattern explicitly removed from `install.sh` in 0.1.1. Replaced with a PyYAML safe_load/safe_dump snippet matching the installer.
+- **`docs/INSTALL.md` stale cron docs (L5)**: removed references to symlinking `cron/*.yaml` and `ls ~/.hermes/cron/pai-*.yaml`. Verify/configure sections rewritten for `~/.hermes/cron/jobs.json`. Bats count corrected 13→15.
+
+### Fixed (INFO)
+
+- **`bin/pai-accept-guard` `set -uo pipefail` → `set -euo pipefail` (I1)**: stricter error contract; trap accumulator preserves exit code so `die`'s explicit code (e.g. 77 for non-SSH) survives.
+
+### Test status
+
+- 18/18 bats (was 15; +3 regressions: M4 heredoc, M2 lock symlink, M5 snapshot allowlist) ✓
+- 27/27 pytest (`tests/test_cost_check.py`) ✓
+- shellcheck clean on `install.sh`, `uninstall.sh`, `bin/pai-accept-guard` ✓
+
+### Known limitations (still in 0.1.2)
+
+- I3 (`SSH_CONNECTION` env spoofable by local unprivileged user) is a design choice per `CLAUDE.md` — the SSH gate prevents Hermes-via-prose bypass, not local-shell attacks.
+- Anthropic admin-API spend fetch still deferred (carried from 0.1.1).
+- Live Hermes integration runtime still unverified.
+
 ## [0.1.1] — 2026-05-16 — Review-driven fixes
 
 Addresses external code review of 0.1.0. All 5 "must fix" items + 6 of 7 "missing" items resolved. One deferred (Anthropic admin-API spend fetch) with honest removal from output schema.

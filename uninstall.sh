@@ -23,9 +23,16 @@ elif [[ -e "$HERMES_SKILLS_DIR" ]]; then
 fi
 
 # === 2. Remove external_dirs entry from config.yaml (pyyaml) =============
-if [[ -f "$HERMES_CONFIG" ]]; then
+if [[ -f "$HERMES_CONFIG" && ! -L "$HERMES_CONFIG" ]]; then
   BACKUP="${HERMES_CONFIG}.bak"
-  cp "$HERMES_CONFIG" "$BACKUP"
+  # L2 fix: refuse if backup target is a symlink (could overwrite arbitrary
+  # file the user can write). Use --no-dereference + --remove-destination
+  # so cp creates a regular file even if BACKUP currently exists.
+  if [[ -L "$BACKUP" ]]; then
+    echo "ERROR: $BACKUP is a symlink, refusing to overwrite" >&2
+    exit 1
+  fi
+  cp --no-dereference --remove-destination "$HERMES_CONFIG" "$BACKUP"
   if HERMES_CONFIG="$HERMES_CONFIG" SKILL_DIR="$HERMES_SKILLS_DIR" python3 <<'PYEOF'
 import os, sys, yaml, pathlib
 cfg = pathlib.Path(os.environ["HERMES_CONFIG"])

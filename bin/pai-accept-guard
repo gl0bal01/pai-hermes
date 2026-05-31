@@ -14,14 +14,32 @@
 #   2   bad arguments / invalid proposal
 #   65  EX_DATAERR — invalid SHA / repo name
 #   75  EX_TEMPFAIL — flock timeout (another pai-accept in flight)
-#   77  EX_NOPERM — not running under SSH (and PAI_LOCAL_OVERRIDE unset)
+#   77  EX_NOPERM — not running under SSH (and PAI_LOCAL_OVERRIDE unset),
+#                  or path escape attempt when running as root
 #
 # shellcheck shell=bash
-set -uo pipefail
+set -euo pipefail
 
 PROG="pai-accept-guard"
 
 die() { echo "${PROG}: $*" >&2; exit "${2:-1}"; }
+
+# Trap accumulator (M3): every tempfile/lockfile appended here is removed on
+# exit. Preserve the original exit code — the trap must not mask `die`'s
+# chosen code (e.g. 77 for non-SSH). `set -u` + empty array would otherwise
+# fail the trap and bash would exit 1.
+CLEANUP=()
+cleanup() {
+  local rc=$?
+  local f
+  if [[ ${#CLEANUP[@]} -gt 0 ]]; then
+    for f in "${CLEANUP[@]}"; do
+      [[ -n "$f" ]] && rm -f "$f"
+    done
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 
 # === 1. SSH-only enforcement ==============================================
 # Allow override only via explicit env, never via CLI flag (harder for LLM
@@ -37,10 +55,34 @@ ID="$1"
 [[ "$ID" =~ ^[A-Za-z0-9._:T-]+$ ]] || die "invalid proposal id: $ID" 65
 
 PROPOSALS_DIR="${PAI_PROPOSALS_DIR:-/var/lib/pai-anywhere/proposals}"
+PATHS_ENV="${PAI_PATHS_ENV:-/etc/pai/paths.env}"
+
+# === 2b. Root path lock (H2) ==============================================
+# When running as root (typically via sudo wrapper), refuse non-canonical
+# paths to prevent PAI_PATHS_ENV=/etc/shadow style arbitrary-file overwrite.
+# Override env vars only honored when running as a non-root user.
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  case "$PATHS_ENV" in
+    /etc/pai/paths.env) ;;
+    *) die "refused: as root, paths.env must be /etc/pai/paths.env (got: $PATHS_ENV)" 77 ;;
+  esac
+  case "$PROPOSALS_DIR" in
+    /var/lib/pai-anywhere/proposals) ;;
+    *) die "refused: as root, proposals dir must be /var/lib/pai-anywhere/proposals" 77 ;;
+  esac
+fi
+
+# Resolve symlinks; refuse path escape via symlink swap.
+if command -v readlink >/dev/null 2>&1; then
+  PATHS_ENV_RESOLVED="$(readlink -f "$PATHS_ENV" 2>/dev/null || echo "$PATHS_ENV")"
+  if [[ "${EUID:-$(id -u)}" -eq 0 && "$PATHS_ENV_RESOLVED" != "/etc/pai/paths.env" ]]; then
+    die "refused: paths.env symlink escape detected (resolves to $PATHS_ENV_RESOLVED)" 77
+  fi
+fi
+
 PROPOSAL="${PROPOSALS_DIR}/${ID}.json"
 [[ -f "$PROPOSAL" ]] || die "proposal not found: $PROPOSAL" 2
 
-PATHS_ENV="${PAI_PATHS_ENV:-/etc/pai/paths.env}"
 [[ -f "$PATHS_ENV" ]] || die "paths.env missing: $PATHS_ENV"
 [[ -w "$PATHS_ENV" ]] || die "paths.env not writable: $PATHS_ENV"
 
@@ -59,54 +101,67 @@ LOG="$(jq -r .commits "$PROPOSAL")"
 KEY="PAI_$(echo "$REPO" | tr 'a-z-' 'A-Z_')_SHA"
 
 # === 4. Atomic paths.env update under flock ===============================
-LOCK="${PAI_ACCEPT_LOCK:-/tmp/pai-accept.lock}"
+# Lock dir in user runtime dir (M2): avoids /tmp symlink race that could
+# truncate arbitrary file via `exec 9>"$LOCK"`.
+LOCK_DEFAULT_DIR="${XDG_RUNTIME_DIR:-/run/user/${EUID:-$(id -u)}}/pai-accept"
+LOCK="${PAI_ACCEPT_LOCK:-${LOCK_DEFAULT_DIR}/lock}"
+LOCK_DIR="$(dirname "$LOCK")"
+# SC2174: -m with -p only applies to deepest dir, so explicit chmod after.
+mkdir -p "$LOCK_DIR" 2>/dev/null || die "cannot create lock dir: $LOCK_DIR"
+chmod 700 "$LOCK_DIR" 2>/dev/null || true
+# Refuse if LOCK is an existing symlink (anti-swap).
+[[ -L "$LOCK" ]] && die "lock path is a symlink, refusing: $LOCK" 77
 exec 9>"$LOCK" || die "cannot open lock: $LOCK"
 flock -w "${PAI_ACCEPT_LOCK_TIMEOUT:-30}" 9 || die "another pai-accept in flight (lock timeout)" 75
 
 TMP="$(mktemp "${PATHS_ENV}.XXXXXX")"
-trap 'rm -f "${TMP:-}"' EXIT
+CLEANUP+=("$TMP")
 grep -v "^${KEY}=" "$PATHS_ENV" > "$TMP" || true
 printf '%s=%s\n' "$KEY" "$SHA" >> "$TMP"
 
 # Preserve permissions of original
 chmod --reference="$PATHS_ENV" "$TMP" 2>/dev/null || chmod 644 "$TMP"
 mv "$TMP" "$PATHS_ENV"   # atomic on same filesystem
-trap - EXIT
 
 echo "${KEY}=${SHA}"
 
 # === 5. Mark proposal accepted (also atomic via tmp+mv) ===================
 TS="$(date -u +%FT%TZ)"
 PTMP="$(mktemp "${PROPOSAL}.XXXXXX")"
-trap 'rm -f "${PTMP:-}"' EXIT
-jq --arg ts "$TS" '.status="accepted" | .acceptedAt=$ts' "$PROPOSAL" > "$PTMP" && mv "$PTMP" "$PROPOSAL"
-trap - EXIT
+CLEANUP+=("$PTMP")
+jq --arg ts "$TS" '.status="accepted" | .acceptedAt=$ts' "$PROPOSAL" > "$PTMP"
+mv "$PTMP" "$PROPOSAL"
 
 # === 6. Optional arc review markdown =====================================
-ARC_DIR="${PAI_COLLAB_DIR:-}/projects/arc/reviews"
-if [[ -n "${PAI_COLLAB_DIR:-}" && -d "$ARC_DIR" && -w "$ARC_DIR" ]]; then
+# AGPL boundary: filesystem write into pai-collab is allowed (MIT content
+# flows into AGPL repo). NO embedding/linking/copying.
+ARC_BASE="${PAI_COLLAB_DIR:-}"
+ARC_DIR="${ARC_BASE}/projects/arc/reviews"
+if [[ -n "$ARC_BASE" && -d "$ARC_DIR" && -w "$ARC_DIR" ]]; then
   SHA7="${SHA:0:7}"
   TODAY="$(date -u +%F)"
   REVIEW="${ARC_DIR}/${TODAY}-pai-watch-${REPO}-${SHA7}.md"
-  cat > "$REVIEW" <<EOF
-# Upstream bump review — ${REPO} @ ${SHA7}
-
-**Proposal**: ${ID}
-**Repo**: ${REPO}
-**Target SHA**: ${SHA}
-**Accepted**: ${TS}
-**Source**: pai-watch auto-detect
-
-## Commits
-
-\`\`\`
-${LOG}
-\`\`\`
-
-## Review
-
-Auto-generated via \`pai-accept-guard ${ID}\`. Human approval recorded as SSH session on VPS.
-EOF
+  # M4 fix: quoted heredoc + printf for attacker-controllable $LOG.
+  # Without this, a malicious upstream commit subject like $(rm -rf ~) would
+  # execute at heredoc-expansion time. ${LOG} comes from `git log %h %s` of
+  # fetched upstream refs — any upstream maintainer is untrusted input.
+  {
+    printf '# Upstream bump review — %s @ %s\n\n' "$REPO" "$SHA7"
+    printf '**Proposal**: %s\n' "$ID"
+    printf '**Repo**: %s\n' "$REPO"
+    printf '**Target SHA**: %s\n' "$SHA"
+    printf '**Accepted**: %s\n' "$TS"
+    printf '**Source**: pai-watch auto-detect\n\n'
+    printf '## Commits\n\n'
+    # Use ~~~ fence (less common in commit subjects than ```) to reduce
+    # fence-break risk; still treat $LOG as opaque untrusted text.
+    printf '~~~\n'
+    printf '%s\n' "$LOG"
+    printf '~~~\n\n'
+    printf '## Review\n\n'
+    # shellcheck disable=SC2016  # backticks are markdown code-span, not shell sub
+    printf 'Auto-generated via `pai-accept-guard %s`. Human approval recorded as SSH session on VPS.\n' "$ID"
+  } > "$REVIEW"
   echo "$REVIEW"
 fi
 

@@ -30,16 +30,15 @@ python3 -c "import yaml" 2>/dev/null || {
 }
 
 # === 1. Symlink skills ====================================================
+# L1 fix: avoid -L/-e race by failing fast if non-symlink exists, then using
+# `ln -snf` to replace symlinks atomically without a separate `rm` step.
 echo "[pai-hermes install] symlinking skills..."
 mkdir -p "$(dirname "$HERMES_SKILLS_DIR")"
-if [[ -L "$HERMES_SKILLS_DIR" ]]; then
-  rm "$HERMES_SKILLS_DIR"
-fi
-if [[ -e "$HERMES_SKILLS_DIR" ]]; then
+if [[ -e "$HERMES_SKILLS_DIR" && ! -L "$HERMES_SKILLS_DIR" ]]; then
   echo "ERROR: $HERMES_SKILLS_DIR exists and is not a symlink" >&2
   exit 1
 fi
-ln -s "$REPO_DIR/skills" "$HERMES_SKILLS_DIR"
+ln -snf "$REPO_DIR/skills" "$HERMES_SKILLS_DIR"
 echo "  $HERMES_SKILLS_DIR -> $REPO_DIR/skills"
 
 # === 2. Patch config.yaml (pyyaml + validate-rollback) ===================
@@ -90,27 +89,43 @@ cfg_path.write_text(new_yaml)
 print("PATCHED")
 PYEOF
 ); then
+  # H1 fix: validate BEFORE any branch deletes the backup, and treat any
+  # unexpected patcher output as fatal (was previously a silent warning).
+  validate_yaml() {
+    python3 -c "import sys, yaml; yaml.safe_load(open('$HERMES_CONFIG').read())" 2>/dev/null
+  }
   case "$PYYAML_OK" in
-    PATCHED)        echo "  added: external_dirs += $HERMES_SKILLS_DIR" ;;
-    ALREADY_PRESENT) echo "  external_dirs already includes $HERMES_SKILLS_DIR (no change)"
-                    rm "$BACKUP"  # nothing changed, no need for backup
-                    ;;
-    *) echo "  unexpected python output: $PYYAML_OK" >&2 ;;
+    PATCHED)
+      if ! validate_yaml; then
+        echo "ERROR: patched config.yaml fails YAML parse. Rolling back from $BACKUP." >&2
+        mv "$BACKUP" "$HERMES_CONFIG"
+        exit 1
+      fi
+      echo "  added: external_dirs += $HERMES_SKILLS_DIR"
+      echo "  validated: post-patch YAML parses OK"
+      rm "$BACKUP"
+      ;;
+    ALREADY_PRESENT)
+      # No write occurred, but still validate current on-disk YAML
+      # before discarding rollback source (covers prior manual breakage).
+      if ! validate_yaml; then
+        echo "ERROR: config.yaml fails YAML parse (pre-existing). Restoring from $BACKUP." >&2
+        mv "$BACKUP" "$HERMES_CONFIG"
+        exit 1
+      fi
+      echo "  external_dirs already includes $HERMES_SKILLS_DIR (no change)"
+      rm "$BACKUP"
+      ;;
+    *)
+      echo "ERROR: unexpected patcher output: $PYYAML_OK — restoring from $BACKUP." >&2
+      mv "$BACKUP" "$HERMES_CONFIG"
+      exit 1
+      ;;
   esac
 else
   echo "ERROR: config.yaml patch failed. Restoring from $BACKUP." >&2
   mv "$BACKUP" "$HERMES_CONFIG"
   exit 1
-fi
-
-# === 2b. Post-patch validation =============================================
-if [[ -f "$BACKUP" ]]; then
-  if ! python3 -c "import yaml,sys; yaml.safe_load(open('$HERMES_CONFIG').read())" 2>/dev/null; then
-    echo "ERROR: patched config.yaml fails YAML parse. Rolling back from $BACKUP." >&2
-    mv "$BACKUP" "$HERMES_CONFIG"
-    exit 1
-  fi
-  echo "  validated: post-patch YAML parses OK"
 fi
 
 # === 3. Validate skills format ============================================

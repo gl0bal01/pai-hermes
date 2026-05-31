@@ -36,6 +36,30 @@ curl -fsS -X POST -H 'content-type: application/json' \
   http://127.0.0.1:31337/notify
 ```
 
+## Safety — JSON construction
+
+ALWAYS build the JSON body via `jq -n --arg`. NEVER inline the message into a
+shell string. User-supplied text often contains `"`, `$`, `` ` ``, backslashes,
+or shell metacharacters that:
+
+- break the JSON if pasted into `-d '{"message":"$msg"}'`
+- execute as shell if the body is built via `-d "{\"message\":\"$msg\"}"`
+  (double quotes → `$()`, backticks, and `${}` all expand)
+
+Wrong:
+```bash
+curl ... -d "{\"message\":\"$user_text\"}"      # command injection
+curl ... -d "{\"message\":\"${user_text}\"}"    # same
+```
+
+Right:
+```bash
+curl ... -d "$(jq -n --arg m "$user_text" '{message:$m}')"
+```
+
+`jq -n --arg` treats `$user_text` as opaque data, escapes it for JSON, and
+shell never re-evaluates it.
+
 ## Execution
 
 Via Hermes `terminal` toolset. Pulse is loopback-only — no network risk.

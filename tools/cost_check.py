@@ -188,9 +188,22 @@ def main():
     }
 
     if args.snapshot:
-        log_path = Path(os.path.expanduser(args.snapshot_log))
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a") as f:
+        # M5 fix: resolve symlinks, require path under ~/.hermes/, open with
+        # O_NOFOLLOW so cron-driven append cannot follow an attacker symlink
+        # into an arbitrary file.
+        log_path = Path(os.path.expanduser(args.snapshot_log)).resolve()
+        hermes_home = Path(os.path.expanduser("~/.hermes")).resolve()
+        if hermes_home != log_path and hermes_home not in log_path.parents:
+            print(
+                f"snapshot path must live under {hermes_home}/ "
+                f"(got: {log_path})",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        log_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW
+        fd = os.open(str(log_path), flags, 0o600)
+        with os.fdopen(fd, "a") as f:
             f.write(json.dumps(output) + "\n")
 
     if args.voice:
