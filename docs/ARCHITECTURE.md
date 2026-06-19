@@ -79,8 +79,9 @@ A sibling repo `pai-projet/` (session-output bash router, 540 LOC) tried to be t
 
 `pai-hermes` adds **only**:
 - 7 SKILL.md files
-- 3 cron yaml files
-- 1 Python helper (`cost_check.py`)
+- 3 cron jobs (registered through Hermes into `jobs.json` — see `cron/README.md`)
+- 2 hardened shell wrappers (`bin/pai-accept-guard`, `bin/pai-pulse-send`)
+- 2 Python helpers (`tools/cost_check.py`, `tools/patch_hermes_config.py`)
 - 1 install.sh that edits `~/.hermes/config.yaml` additively
 
 Never modifies:
@@ -106,7 +107,7 @@ Exception: `pai-cost-tracker` ships `tools/cost_check.py` because PAI usage cach
 
 ### 4. Security model
 
-- `pai-accept` SSH-only. Never callable from remote platform (TG/Discord/Signal/WA). Plan v5 §13 ADR enforced.
+- `pai-accept` is real-SSH-only, enforced in `bin/pai-accept-guard` by `sshd` process-ancestry (not the spoofable `SSH_*` env). Never callable from a remote platform (TG/Discord/Signal/WA). Plan v5 §13 ADR enforced.
 - No new Pulse routes added (composition rule + Miessler's launchd is fixed).
 - pai-anywhere gateway exposes ONLY `/proposals/<id>` GET read-only (POST/DELETE return 405).
 - Voice alerts respect quiet hours config to avoid 3am wake-ups.

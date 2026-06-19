@@ -5,7 +5,8 @@
 | Component | Required | Verify |
 |-----------|----------|--------|
 | Hermes Agent | YES | `hermes --version` (any) |
-| Python 3 + PyYAML | YES (config patcher) | `python3 -c "import yaml"` |
+| Python 3 | YES (config patcher, cost check) | `python3 --version` |
+| ruamel.yaml | auto-installed by `install.sh` | `python3 -c "import ruamel.yaml"` |
 | bats | YES (test runner) | `command -v bats` |
 | jq | YES (skill bodies) | `command -v jq` |
 | flock | YES (pai-accept guard) | `command -v flock` |
@@ -20,8 +21,8 @@ npm install -g oh-my-claudecode
 # or
 bun install -g oh-my-claudecode
 
-# bats + jq + flock + pyyaml (Ubuntu/Debian)
-sudo apt install -y bats jq python3 python3-yaml git curl util-linux
+# bats + jq + flock + python3/pip (Ubuntu/Debian; ruamel.yaml is auto-installed)
+sudo apt install -y bats jq python3 python3-pip git curl util-linux
 ```
 
 ## Quick install (local dev)
@@ -33,13 +34,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
-What `install.sh` does (0.1.1):
-1. Symlinks `skills/` → `~/.hermes/skills/pai-hermes` (atomic `ln -snf`)
-2. Patches `~/.hermes/config.yaml` `skills.external_dirs` to include `~/.hermes/skills/pai-hermes`
-   via PyYAML safe-load/safe-dump (NOT regex — see "Why PyYAML" below)
-3. Backs up config to `~/.hermes/config.yaml.bak` BEFORE patching
-4. Validates post-patch YAML; rolls back from backup if parse fails
-5. Validates SKILL.md format via bats
+What `install.sh` does (0.1.3):
+1. Symlinks `skills/` → `~/.hermes/skills/pai-hermes` (true-atomic `ln -s … && mv -T`)
+2. Ensures `ruamel.yaml` is importable (auto-installs via `pip` if missing)
+3. Adds `~/.hermes/skills/pai-hermes` to `skills.external_dirs` in `~/.hermes/config.yaml`
+   via `tools/patch_hermes_config.py` — a ruamel round-trip that **appends** (never
+   replaces) and preserves your comments/formatting (see "Why ruamel" below)
+4. Backs up the config first, writes it **atomically**, rolls back if the result won't parse
+5. Holds a single-flight lock and refuses to run if the config isn't owned by you
+6. Validates SKILL.md format via bats
 
 Cron jobs are NOT symlinked. Hermes cron is JSON-managed via Hermes itself;
 register manually after install — see `cron/README.md`.
@@ -78,24 +81,13 @@ sudo chown -R pai:pai /opt/pai-hermes
 # 4. Install pai-hermes wiring as pai user
 sudo -u pai bash -lc 'cd /opt/pai-hermes && ./install.sh'
 
-# 5. (Optional) Wire PAI canonical Packs via PyYAML — never via regex.
-#    Replace the path with your actual PAI canonical Packs location.
+# 5. (Optional) Wire PAI canonical Packs into Hermes' external_dirs.
+#    Use the bundled patcher (comment-preserving, atomic, append-only) —
+#    not an inline edit. Replace the path with your actual PAI Packs location.
 sudo -u pai bash -lc '
-HERMES_CONFIG="$HOME/.hermes/config.yaml" \
-PACKS_DIR="/opt/pai-projet/Personal_AI_Infrastructure/Packs" \
-python3 <<"PYEOF"
-import os, sys, pathlib, yaml
-cfg = pathlib.Path(os.environ["HERMES_CONFIG"])
-target = os.environ["PACKS_DIR"]
-data = yaml.safe_load(cfg.read_text()) or {}
-skills = data.setdefault("skills", {})
-ext = skills.setdefault("external_dirs", [])
-if target in ext:
-    print("already added"); sys.exit(0)
-ext.append(target)
-cfg.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True))
-print("added PAI Packs to external_dirs")
-PYEOF
+  HERMES_CONFIG="$HOME/.hermes/config.yaml" \
+  python3 /opt/pai-hermes/tools/patch_hermes_config.py \
+    --add-external-dir /opt/pai-projet/Personal_AI_Infrastructure/Packs
 '
 
 # 6. Restart Hermes (must be done by user — Hermes daemon mgmt is its own concern)
@@ -105,33 +97,42 @@ sudo -u pai bash -lc 'pkill -f hermes; nohup hermes >/var/log/pai/hermes.log 2>&
 sudo -u pai bash -lc 'hermes -c "doctor"'   # if Hermes has CLI-mode flag
 ```
 
-### Why PyYAML, not regex
+### Why ruamel.yaml, not regex (or PyYAML)
 
 YAML allows multiple equivalent indentations, flow vs block style, anchors,
-and comment lines that survive round-trip only via a real parser. Regex
-substitution on YAML produces corrupt files when the user's `external_dirs:`
-is written inline (`[a, b]`) or under a non-default indent. The 0.1.1
-installer was rewritten to load → mutate → safe_dump for this reason.
+and comments. Regex substitution corrupts files when `external_dirs:` is
+written inline (`[a, b]`) or under a non-default indent. PyYAML parses
+correctly but its `safe_dump` discards every comment and re-flows the file.
+Since 0.1.3 the patcher (`tools/patch_hermes_config.py`) uses a `ruamel.yaml`
+round-trip, so your comments and layout survive; the write is atomic
+(temp file + `os.replace`) and re-validated before the swap.
 
-### `pai-accept-guard` (SSH-only gate)
+### `pai-accept-guard` (real-SSH-only gate)
 
-If using pai-accept via pai-watch flow, install the guard:
+If using `pai-accept` via the `pai-watch` flow, install the guard:
 
 ```bash
 sudo ln -sf /opt/pai-hermes/bin/pai-accept-guard /usr/local/bin/pai-accept-guard
 ```
 
-**MUST NOT be run with `sudo --preserve-env` / `sudo -E`**. When the guard
-detects `EUID=0`, it locks all path-bearing env vars to canonical locations
-to prevent `PAI_PATHS_ENV=/etc/shadow` style overwrite. Best practice: keep
-the default `Defaults env_reset` in your sudoers.
+The guard authorizes a pin only when `sshd` is in the invoking process's
+ancestry (verified via `/proc`); the spoofable `SSH_*` environment variables
+are **ignored**, so a remotely-driven Hermes cannot pass it. Operate from
+anywhere with a **Tailscale SSH** session. For non-SSH local admin or CI,
+create a **root-owned** `/etc/pai/local-accept.allow` (mode `0600`) — a
+non-root process cannot forge it.
+
+**Do NOT run via `sudo --preserve-env` / `sudo -E`.** Under `EUID=0` the guard
+also locks all path-bearing env vars to canonical locations to prevent a
+`PAI_PATHS_ENV=/etc/shadow`-style overwrite. Keep the default
+`Defaults env_reset` in your sudoers.
 
 ## Verify install
 
 ```bash
 # Skill format + scripts
 cd ~/pai-hermes
-bats tests/skill-format.bats   # all 15 tests should pass
+bats tests/skill-format.bats   # all 21 tests should pass
 
 # Skills loaded in Hermes
 hermes --skills | grep -E "omc|pai-(pulse|watch|doctor|accept|cost-tracker|statusline-banner)"
