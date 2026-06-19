@@ -2,7 +2,7 @@
 
 > Bridge skills + cron jobs that make [Hermes Agent](https://github.com/NousResearch/Hermes-Agent) PAI-ecosystem-aware. Replaces 540 LOC of pai-projet bash with native Hermes skills.
 
-**Status**: v0.1.0 scaffold (2026-05-16). NOT yet deployed.
+**Status**: v0.1.2 (2026-05-16). Skills wired; cron registered via Hermes jobs.json.
 
 ## What it does
 

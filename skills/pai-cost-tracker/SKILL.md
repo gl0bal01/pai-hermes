@@ -17,7 +17,7 @@ User intent:
 - "usage" → snapshot current 5h/7d %
 - "am I close to limit" → threshold check
 - "cost this month" → API spend from admin key (if available)
-- Automated hourly cron — see `cron/pai-cost-tracker.yaml`
+- Automated hourly cron — see `cron/README.md` (Hermes jobs.json registration)
 
 ## Data sources
 
@@ -26,18 +26,20 @@ User intent:
 | PAI usage cache | 5h/7d %, native rate_limits | `~/.claude/PAI/MEMORY/STATE/usage-cache.json` |
 | PAI CostTracker ledger | Historical snapshots | `~/.claude/PAI/MEMORY/OBSERVABILITY/anthropic-cost.jsonl` |
 | Hermes own model usage | Multi-provider tokens consumed | `~/.hermes/state.db` (sqlite, table TBD) |
-| Anthropic admin API | API spend $ this month | requires `ANTHROPIC_ADMIN_API_KEY` env |
+| Anthropic admin API | API spend $ this month | deferred to v0.2 — `ANTHROPIC_ADMIN_API_KEY` path not yet implemented |
 
 ## Thresholds (default)
+
+Canonical source: `tools/cost_check.py` `DEFAULT_THRESHOLDS`. Values below are read from that dict.
 
 | Window | Warn | Alert (voice) | Block |
 |--------|------|---------------|-------|
 | 5h Claude | 60% | 80% | 95% |
 | 7d Claude | 70% | 85% | 95% |
-| 7d Opus-specific | 75% | 90% | 95% |
-| 7d Sonnet-specific | 75% | 90% | 95% |
-| Monthly extra_usage credits | 40% | 70% | 90% |
-| API spend (admin key) | $50 | $150 | $400 |
+| 7d Opus-specific | — | 90% | — |
+| 7d Sonnet-specific | — | 90% | — |
+| Monthly extra_usage credits | — | 70% | — |
+| API spend (admin key) | — | deferred to v0.2 | — |
 
 Configurable in `~/.hermes/config.yaml` under `pai_hermes.cost_thresholds:`.
 
@@ -69,7 +71,6 @@ Configurable in `~/.hermes/config.yaml` under `pai_hermes.cost_thresholds:`.
   "opus_7d_pct": 65,
   "sonnet_7d_pct": 30,
   "extra_credits_used_pct": 12,
-  "api_spend_month_usd": 0,
   "alerts_triggered": ["five_hour"],
   "block_triggered": [],
   "next_reset_5h": "2026-05-16T18:00:00Z"
@@ -82,30 +83,19 @@ Templates per trigger:
 - `five_hour Alert`: "5 hour Claude window at {pct}%. Consider taking a break."
 - `seven_day Alert`: "Weekly Claude limit at {pct}%. Reset in {hours} hours."
 - `extra_credits Alert`: "Extra credits at {pct}% of monthly limit. ${used} of ${limit}."
-- `api_spend Alert`: "API spend this month {usd_used} dollars. Watch for leaks."
-
-Sent via `pai-pulse` skill (ElevenLabs TTS through Pulse).
+Sent via `pai-pulse` skill (ElevenLabs TTS through Pulse). API spend voice alert deferred to v0.2.
 
 ## Cron entry
 
-See `cron/pai-cost-tracker.yaml`:
+Register via Hermes — see `cron/README.md`. Job is stored in `~/.hermes/cron/jobs.json`:
 
-```yaml
-name: pai-cost-tracker
-schedule: "0 * * * *"     # hourly
-task: "Run pai-cost-tracker skill, voice-alert if threshold exceeded"
+```json
+{ "name": "pai-cost-tracker", "schedule": { "kind": "cron", "expr": "0 * * * *" }, "skill": "pai-cost-tracker" }
 ```
 
 ## Coordination with omc skill
 
-`omc` skill should call `pai-cost-tracker` PRE-FLIGHT before launching:
-- ralph, autopilot, team, ultrawork (HIGH cost class)
-
-If 5h window >85%, refuse launch:
-```
-omc: pre-flight refused. 5h window at 87%. Resume after {reset_time}.
-Override: explicit --force flag from user.
-```
+Pre-flight gate: if 5h window ≥80% (ALERT, per `tools/cost_check.py` DEFAULT_THRESHOLDS), `omc` skill refuses ralph/team/autopilot/ultrawork until reset or user passes `--force`.
 
 ## Caveats
 

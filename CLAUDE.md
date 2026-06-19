@@ -2,7 +2,7 @@
 
 > Build-time briefing for AI agents working on this repo. Read before touching skill content.
 
-**Phase**: v0.1.0 scaffold (2026-05-16).
+**Phase**: v0.1.2 (2026-05-16).
 
 ## Mission
 
@@ -12,7 +12,7 @@ Make Hermes Agent PAI-ecosystem-aware via 7 skills + 3 cron jobs. Replace `pai-p
 
 ### In scope
 - 7 SKILL.md files (markdown only, no Python tools required for MVP).
-- 3 Hermes cron entries (yaml).
+- 3 Hermes cron jobs (registered via Hermes into jobs.json — see cron/README.md).
 - `install.sh` that edits `~/.hermes/config.yaml` (`skills.external_dirs` + cron registration).
 - 1 optional Python helper (`tools/cost_check.py`) for cost-tracker skill.
 - bats test validating SKILL.md frontmatter.
@@ -33,7 +33,7 @@ Make Hermes Agent PAI-ecosystem-aware via 7 skills + 3 cron jobs. Replace `pai-p
 | Hermes integration | Read-only: skill points Hermes at existing tools (terminal, code_execution, delegate, voice). |
 | External dirs | Append, never replace. Preserve user's existing `external_dirs:`. |
 | Cron | Use Hermes's built-in cron scheduler. Never deploy systemd timers. |
-| Auth | `pai-accept` is SSH-only — never callable via Pulse, gateway, or remote platform. |
+| Auth | `pai-accept` requires a real SSH session — enforced by `sshd` process-ancestry (not the spoofable `SSH_*` env), so it is never callable via Pulse, gateway, or a remote-platform-driven Hermes. Tailscale SSH satisfies it from anywhere; non-SSH break-glass is a root-owned `/etc/pai/local-accept.allow`. |
 | Cost | Subscription-first. `pai-cost-tracker` warns when API spend approaches threshold. |
 | Composition | Never modify sub-projects (PAI canonical, OMC, pai-anywhere, Hermes). Glue only. |
 
@@ -67,9 +67,7 @@ pai-hermes/
 ├── tools/
 │   └── cost_check.py                        # optional helper for cost-tracker
 ├── cron/
-│   ├── pai-watch.yaml                       # hourly
-│   ├── pai-cost-tracker.yaml                # hourly
-│   └── pai-statusline-banner.yaml           # daily 18:00
+│   └── README.md                            # job registration instructions (jobs.json via Hermes)
 ├── tests/
 │   └── skill-format.bats                    # validates frontmatter
 └── docs/

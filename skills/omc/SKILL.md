@@ -46,7 +46,7 @@ bun install -g oh-my-claudecode
 ## Environment
 
 OMC subprocess MUST run with:
-- `HOME=/home/pai` (or wherever PAI canonical lives on VPS)
+- `HOME=$HOME` (the PAI user's home directory, e.g. `/home/pai` on a dedicated VPS user)
 - `CLAUDE_CONFIG_DIR=$HOME/.claude`
 
 This ensures PAI statusline + UpdateCounts.hook + Spinner assets resolve. Without these, OMC launches a vanilla Claude Code session without PAI integration.
@@ -61,7 +61,7 @@ This ensures PAI statusline + UpdateCounts.hook + Spinner assets resolve. Withou
 
 `ralph`, `autopilot`, `team`, `ultrawork` burn Claude API tokens at scale (multi-agent, multi-turn). Confirm with user before launching when task scope >5 files OR estimated duration >30 min.
 
-If `pai-cost-tracker` reports 5h window >80%, **refuse to launch high-cost OMC commands** until window resets or user explicitly overrides.
+If `pai-cost-tracker` reports 5h window ≥80% (ALERT) or ≥95% (BLOCK per `tools/cost_check.py` DEFAULT_THRESHOLDS), **refuse to launch high-cost OMC commands** until window resets or user explicitly overrides.
 
 ## Caveats
 

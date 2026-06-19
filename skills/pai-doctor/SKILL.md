@@ -13,11 +13,11 @@ User intent:
 - Before launching expensive task (verify pai-anywhere up before omc ralph)
 - Cron-driven daily health digest (pair with pai-statusline-banner)
 
-## Probes (25+ checks)
+## Probes (25 checks)
 
 ### Infra
 - `pai_anywhere_systemd_status` — systemctl is-active pai-anywhere.service
-- `pulse_reachable` — HTTP 200 on $PAI_PULSE_URL
+- `pulse_reachable` — HTTP 200 on $PAI_PULSE_URL; probe refuses non-loopback URLs (must be http://127.0.0.1:... or http://localhost:...). See S10 caveat below.
 - `pulse_port_format` — URL matches loopback 127.0.0.1 port pattern
 - `tailscale_present` — tailscale binary on PATH
 - `tailscale_serve_active` — gateway exposed via Serve PRIVATE
@@ -42,9 +42,9 @@ User intent:
 ### pai-hermes wiring
 - `hermes_config_present` — ~/.hermes/config.yaml readable
 - `hermes_external_dirs_includes_pai_hermes` — config has pai-hermes path in external_dirs
-- `hermes_cron_pai_watch` — cron yaml present
-- `hermes_cron_pai_cost_tracker` — cron entry present
-- `hermes_cron_pai_statusline_banner` — cron entry present
+- `hermes_cron_pai_watch` — job entry present in ~/.hermes/cron/jobs.json
+- `hermes_cron_pai_cost_tracker` — job entry present in ~/.hermes/cron/jobs.json
+- `hermes_cron_pai_statusline_banner` — job entry present in ~/.hermes/cron/jobs.json
 
 ### Tooling
 - `jq_available`, `curl_available`, `git_available`, `flock_available`
@@ -70,13 +70,14 @@ Status values: `pass`, `fail`, `skip`.
 
 Via Hermes terminal toolset. Pure shell. ~1s total. Zero AI cost.
 
-If pai-projet/bin/pai doctor exists, delegate to it (already has 25 probes). Otherwise reimplement here.
+Implemented as pure shell checks. Does NOT delegate to the retired `pai-projet/bin/pai doctor`.
 
 ## Caveats
 
 - Some probes macOS-specific (PAI canonical statusline assumes launchd). On Linux VPS, pai_anywhere_systemd_status replaces.
 - Probes are advisory — fail doesn't auto-fix. For remediation, pai-anywhere doctor --fix or install missing deps.
 - Voice probes (arecord_present, whisper_cli_present) may legitimately fail on headless server.
+- `pulse_reachable`: $PAI_PULSE_URL MUST be loopback (http://127.0.0.1:31337 or http://localhost:31337). The probe aborts with exit 78 if the URL resolves to a non-loopback address.
 
 ## Triggers in Hermes natural language
 

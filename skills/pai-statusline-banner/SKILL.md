@@ -15,7 +15,7 @@ This skill aggregates the same signals into a single text message pushed via `pa
 
 User intent:
 - "daily summary", "brief me", "digest"
-- Cron-driven 18:00 daily — see `cron/pai-statusline-banner.yaml`
+- Cron-driven 18:00 daily — see `cron/README.md` (Hermes jobs.json registration)
 - On-demand "what happened today"
 
 ## Composed message structure
@@ -65,12 +65,10 @@ Top quote: "<from PAI Quote rotation>"
 
 ## Cron entry
 
-See `cron/pai-statusline-banner.yaml`:
+Register via Hermes — see `cron/README.md`. Job is stored in `~/.hermes/cron/jobs.json`:
 
-```yaml
-name: pai-statusline-banner
-schedule: "0 18 * * *"    # daily 18:00 UTC
-task: "Run pai-statusline-banner skill, push to mobile"
+```json
+{ "name": "pai-statusline-banner", "schedule": { "kind": "cron", "expr": "0 18 * * *" }, "skill": "pai-statusline-banner" }
 ```
 
 ## Output
@@ -102,6 +100,7 @@ Skill chain pattern: banner is composer, others are providers.
 - Mobile push relies on Pulse `/notify` reaching mobile via Tailscale — verify with `pai-doctor` before scheduling.
 - Quote pool from PAI canonical may not exist on fresh install — fallback to empty quote section.
 - DAGrowth.ts mood may be macOS-only — gracefully skip if file absent.
+- Env vars `PAI_PROPOSALS_DIR`, `PAI_ALGO_MEMORY`, `PAI_QUOTES_FILE` must be operator-set; they are read as-is with no further validation. Recommended locations: under `~/.claude/` or `/var/lib/pai-anywhere/`.
 
 ## Cost
 

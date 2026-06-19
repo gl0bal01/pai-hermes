@@ -11,7 +11,7 @@ User intent:
 - "check upstream for X" → manual one-shot watch
 - "what changed in PAI / OMC this week" → recent commits summary
 - "any upgrades pending" → list active proposals
-- Automated via cron (default: hourly) — see `cron/pai-watch.yaml`
+- Automated via cron (default: hourly) — see `cron/README.md` (Hermes jobs.json registration)
 
 ## Algorithm
 
@@ -57,12 +57,10 @@ For each repo in `PAI_WATCH_SOURCES` (default 4):
 
 ## Cron entry
 
-See `cron/pai-watch.yaml`:
+Register via Hermes — see `cron/README.md`. Job is stored in `~/.hermes/cron/jobs.json`:
 
-```yaml
-name: pai-watch
-schedule: "0 * * * *"     # hourly
-task: "Run pai-watch skill"
+```json
+{ "name": "pai-watch", "schedule": { "kind": "cron", "expr": "0 * * * *" }, "skill": "pai-watch" }
 ```
 
 ## Cost

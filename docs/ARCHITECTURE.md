@@ -102,7 +102,7 @@ Exception: `pai-cost-tracker` ships `tools/cost_check.py` because PAI usage cach
 | Cron jobs (pai-watch / pai-cost-tracker / pai-statusline-banner) | ZERO. Pure data aggregation. |
 | User-triggered (omc / pai-pulse / pai-accept / pai-doctor) | Variable. `omc ralph/team/autopilot` are HIGH cost. |
 
-`pai-cost-tracker` gates high-cost OMC invocations. If 5h window >85%, OMC skill refuses to launch ralph/team/autopilot until reset.
+`pai-cost-tracker` gates high-cost OMC invocations. If 5h window ≥80% (ALERT) or ≥95% (BLOCK) per `tools/cost_check.py` DEFAULT_THRESHOLDS, OMC skill refuses to launch ralph/team/autopilot until reset.
 
 ### 4. Security model
 

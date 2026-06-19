@@ -31,7 +31,7 @@ Skill MUST stop and request explicit user confirmation before:
 - Writing to `/etc/pai/paths.env` (SHA pin change → `pai-accept` SSH-only).
 - Writing to `pai-collab/projects/arc/reviews/*.md` (AGPL boundary — content flows in, MIT stays in pai-hermes).
 - Editing `~/.hermes/config.yaml` non-additively (only `install.sh` may, and only additively).
-- Invoking high-cost OMC modes (`ralph`, `team`, `autopilot`, `ultrawork`) when `pai-cost-tracker` 5h window >85%.
+- Invoking high-cost OMC modes (`ralph`, `team`, `autopilot`, `ultrawork`) when `pai-cost-tracker` 5h window ≥80% ALERT or ≥95% BLOCK (per `tools/cost_check.py` DEFAULT_THRESHOLDS).
 - Triggering Pulse voice alerts during quiet hours.
 
 Cron jobs MUST NOT bypass gates. Cron emits proposal → user accepts via SSH.
