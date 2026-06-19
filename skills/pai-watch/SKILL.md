@@ -17,18 +17,50 @@ User intent:
 
 For each repo in `PAI_WATCH_SOURCES` (default 4):
 
-1. `git -C <repo-dir> fetch --quiet origin`
-2. Compare `HEAD` vs upstream tracking branch (e.g. `origin/main`).
-3. If diverged, get commit log `git log --pretty="%h %s" HEAD..origin/main`.
-4. Compute impact score (0-100):
+1. Validate repo name and resolve path (see **Repo validation** below).
+2. `GIT_CONFIG_GLOBAL=/dev/null git -C <repo-dir> fetch --quiet origin`
+3. Compare `HEAD` vs upstream tracking branch (e.g. `origin/main`).
+4. If diverged, get commit log `GIT_CONFIG_GLOBAL=/dev/null git -C <repo-dir> log --pretty="%h %s" HEAD..origin/main`.
+5. Compute impact score (0-100):
    - `+5` per new commit
    - `+25` per commit subject matching `\b(breaking|major|incompatible|drop|remove)\b` (case-insensitive)
    - `+15` per commit touching critical paths: `src/cli/`, `Algorithm/`, `Pulse/`, `install.sh`, `paths.env`
    - Cap at 100.
-5. If score ≥ `PAI_WATCH_THRESHOLD` (default 10):
+6. If score ≥ `PAI_WATCH_THRESHOLD` (default 10):
    - Write JSON proposal to `$PAI_PROPOSALS_DIR/<id>.json` (id = `<ISO-ts>-<repo>`).
-   - POST to Pulse `/notify` via pai-pulse skill.
-6. Else log and skip.
+   - Notify via `pai-pulse-send --message "<alert text>"`.
+7. Else log and skip.
+
+## Repo validation
+
+**Before running any git command**, each repo name from `PAI_WATCH_SOURCES` must be validated:
+
+```bash
+PAI_PROJET_ROOT="${PAI_PROJET_ROOT:-/opt/pai-projet}"
+
+for repo in $PAI_WATCH_SOURCES; do
+  # 1. Name must match safe pattern — no slashes, dots-only, flag-like strings.
+  if [[ ! "$repo" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "pai-watch: skipping unsafe repo name: $repo" >&2
+    continue
+  fi
+
+  # 2. Resolved path must stay under PAI_PROJET_ROOT (no traversal).
+  repo_path="$(realpath -m "${PAI_PROJET_ROOT}/${repo}" 2>/dev/null || echo "")"
+  root_real="$(realpath -m "${PAI_PROJET_ROOT}" 2>/dev/null || echo "${PAI_PROJET_ROOT}")"
+  case "${repo_path}/" in
+    "${root_real}/"*) ;;
+    *) echo "pai-watch: path traversal refused for: $repo" >&2; continue ;;
+  esac
+
+  # 3. Run git with a neutralized global config to prevent hostile hook injection.
+  GIT_CONFIG_GLOBAL=/dev/null git -C "$repo_path" fetch --quiet origin
+  # ... rest of per-repo logic
+done
+```
+
+`GIT_CONFIG_GLOBAL=/dev/null` prevents a crafted `~/.gitconfig` (or a repo-local
+`core.hooksPath` inherited from global config) from executing arbitrary commands during fetch.
 
 ## Proposal JSON schema
 
@@ -73,23 +105,9 @@ ZERO AI cost. Pure `git fetch` + bash regex. No model invocation.
 - Network failure on one repo doesn't block others (per-repo try/catch).
 - If `PAI_PROPOSALS_DIR` not writable, proposal silently skipped — verify via `pai-doctor` skill.
 - Pulse `/notify` failure is non-fatal — proposal still written to disk.
+- Repo names with `..`, leading `-`, or characters outside `[A-Za-z0-9._-]` are skipped.
 
 ## Skill chain
 
-`pai-watch` → writes proposals → calls `pai-pulse` to push mobile alert.
-
-User then:
-- `pai-watch list` → see pending
-- `pai-accept <id>` → SHA-pin proposal (separate skill)
-
-## Bash one-liner equivalent (no skill)
-
-```bash
-for repo in oh-my-claudecode Personal_AI_Infrastructure pai-anywhere pai-review-mode; do
-  cd /opt/pai-projet/$repo && git fetch -q && \
-    git log --pretty='%h %s' HEAD..@{u} 2>/dev/null | \
-    awk -v r=$repo 'NF{c++} /(BREAKING|major)/{b++} END{print r, c, b}'
-done
-```
-
-Skill wraps this with score + proposal writer + notify.
+`pai-watch` → writes proposals → calls `pai-pulse-send` to push mobile alert.
+User then runs `pai-watch list` or `pai-accept <id>` to SHA-pin a proposal.

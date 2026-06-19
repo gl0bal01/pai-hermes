@@ -28,37 +28,47 @@ Pulse handles:
 - Push routing to mobile via Tailscale Serve PRIVATE
 - Display in Pulse dashboard at `https://<vps>.<tailnet>.ts.net/pulse`
 
-## Command
+## Command — MANDATORY
+
+**Always invoke via `bin/pai-pulse-send`** — never call curl directly for Pulse notifications.
+`pai-pulse-send` is the only sanctioned entrypoint: it validates the URL is loopback-only,
+validates message length, and builds the JSON body via `jq --arg` so that any injected
+shell metacharacters (`$(...)`, backticks, `${...}`) are passed as literal text instead of
+executing.
 
 ```bash
-curl -fsS -X POST -H 'content-type: application/json' \
-  -d "$(jq -n --arg m "<message>" '{message:$m}')" \
-  http://127.0.0.1:31337/notify
+pai-pulse-send --message "<message text>" [--title "<title>"]
+```
+
+With a custom URL (overrides `$PAI_PULSE_URL`):
+
+```bash
+pai-pulse-send --message "<message text>" --url http://127.0.0.1:31337
 ```
 
 ## Safety — JSON construction
 
-ALWAYS build the JSON body via `jq -n --arg`. NEVER inline the message into a
-shell string. User-supplied text often contains `"`, `$`, `` ` ``, backslashes,
-or shell metacharacters that:
+`pai-pulse-send` builds the JSON body with:
 
-- break the JSON if pasted into `-d '{"message":"$msg"}'`
-- execute as shell if the body is built via `-d "{\"message\":\"$msg\"}"`
-  (double quotes → `$()`, backticks, and `${}` all expand)
-
-Wrong:
 ```bash
-curl ... -d "{\"message\":\"$user_text\"}"      # command injection
-curl ... -d "{\"message\":\"${user_text}\"}"    # same
+jq -n --arg msg "$MSG" --arg title "$TITLE" '{message: $msg, title: $title}'
 ```
 
-Right:
+`jq --arg` treats every value as opaque data — quotes, `$()`, backticks, backslashes are all
+escaped for JSON and never re-evaluated by the shell. The wrapper also refuses any non-loopback
+URL (exit 77) so Pulse can never be redirected to an external host.
+
+**Discouraged — do not use raw curl for Pulse notifications:**
+
 ```bash
+# WRONG — string interpolation executes metacharacters:
+curl ... -d "{\"message\":\"$user_text\"}"
+
+# WRONG — still expands $() inside double quotes:
 curl ... -d "$(jq -n --arg m "$user_text" '{message:$m}')"
 ```
 
-`jq -n --arg` treats `$user_text` as opaque data, escapes it for JSON, and
-shell never re-evaluates it.
+Use `pai-pulse-send` instead.
 
 ## Execution
 
@@ -72,13 +82,15 @@ If Pulse unreachable (probe via `pai-doctor` skill first), fall back to:
 ## Inputs
 
 - `message` (required) — text to synthesize. Plain text, no markdown. Max ~200 chars for natural prosody.
-- `priority` (optional, future) — Pulse may accept priority levels.
+- `title` (optional) — short label, passed as JSON field.
+- `--url` (optional) — override `$PAI_PULSE_URL` (must still be loopback).
 
 ## Caveats
 
 - Pulse on **Linux VPS** may not run by default (PAI canonical Pulse is macOS launchd). Verify via `pai-doctor`.
 - ElevenLabs SDK requires API key configured in PAI canonical install. No key → TTS fails silently.
 - Loopback only — never expose `/notify` publicly. Mobile push happens via Pulse's own routing, not direct from external.
+- `pai-pulse-send` enforces max 4096-byte messages; keep notifications concise.
 
 ## Cost
 
@@ -87,16 +99,16 @@ If Pulse unreachable (probe via `pai-doctor` skill first), fall back to:
 
 ## Triggers in Hermes natural language
 
-- "notify me when this is done" → wrap final result in pai-pulse call
-- "voice my last commit message" → `git log -1 --pretty=%s` → pai-pulse
-- "tell me on my phone X" → pai-pulse → Pulse routes to mobile
-- "alert me at 17:00 to check the deploy" → Hermes cron + pai-pulse skill
+- "notify me when this is done" → wrap final result in pai-pulse-send call
+- "voice my last commit message" → `git log -1 --pretty=%s` → pai-pulse-send
+- "tell me on my phone X" → pai-pulse-send → Pulse routes to mobile
+- "alert me at 17:00 to check the deploy" → Hermes cron + pai-pulse-send
 
 ## Example invocation from skill chain
 
 After `omc ralph` finishes:
-```
-pai-pulse: {"message": "Ralph completed: 3 tests fixed, 1 file modified."}
+```bash
+pai-pulse-send --message "Ralph completed: 3 tests fixed, 1 file modified."
 ```
 
 User hears via mobile within seconds.

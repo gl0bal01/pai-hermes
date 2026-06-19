@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# pai-pulse-send — ONLY sanctioned way to POST a Pulse notification.
+#
+# An LLM-driven skill (pai-pulse) could be prompt-injected into running
+# arbitrary shell via inline message construction. This wrapper enforces:
+#   - JSON body built entirely via jq --arg (never string-interpolated)
+#   - Pulse URL restricted to loopback (127.0.0.1 / localhost / ::1)
+#   - Message length and NUL-byte validation
+#
+# Usage:
+#   pai-pulse-send --message "<text>" [--title "<text>"] [--url "<pulse-url>"]
+#
+# Exit codes:
+#   0   success
+#   1   generic failure
+#   2   bad arguments / validation failure
+#   77  EX_NOPERM — non-loopback URL refused (SSRF protection)
+#
+# shellcheck shell=bash
+set -euo pipefail
+
+PROG="pai-pulse-send"
+
+die() { echo "${PROG}: $*" >&2; exit "${2:-1}"; }
+
+# === 1. Parse arguments ===================================================
+MSG=""
+TITLE=""
+PULSE_URL="${PAI_PULSE_URL:-http://127.0.0.1:31337}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --message)
+      [[ $# -ge 2 ]] || die "missing value for --message" 2
+      MSG="$2"; shift 2 ;;
+    --title)
+      [[ $# -ge 2 ]] || die "missing value for --title" 2
+      TITLE="$2"; shift 2 ;;
+    --url)
+      [[ $# -ge 2 ]] || die "missing value for --url" 2
+      PULSE_URL="$2"; shift 2 ;;
+    *) die "unknown argument: $1" 2 ;;
+  esac
+done
+
+[[ -n "$MSG" ]] || die "usage: ${PROG} --message <text> [--title <text>] [--url <pulse-url>]" 2
+
+# === 2. Validate URL is loopback-only (SSRF protection) ===================
+# Strip scheme and extract host (handles http://host/path and http://host:port/path).
+url_host="${PULSE_URL#http://}"
+url_host="${url_host#https://}"
+url_host="${url_host%%/*}"
+url_host="${url_host%%:*}"
+
+# Reject https scheme — Pulse is loopback-only plain HTTP.
+case "$PULSE_URL" in
+  http://*) ;;
+  *) die "Pulse URL must use http:// scheme (loopback only): ${PULSE_URL}" 77 ;;
+esac
+
+case "$url_host" in
+  127.0.0.1|localhost|::1) ;;
+  *) die "Pulse URL must be loopback (127.0.0.1 / localhost / ::1), got: ${url_host}" 77 ;;
+esac
+
+# === 3. Validate message ==================================================
+# Reject NUL bytes (would truncate JSON or confuse curl).
+if printf '%s' "$MSG" | grep -qP '\x00' 2>/dev/null; then
+  die "message must not contain NUL bytes" 2
+fi
+
+# Reject absurdly long messages (>4096 bytes).
+MSG_LEN="${#MSG}"
+[[ "$MSG_LEN" -le 4096 ]] || die "message too long (${MSG_LEN} bytes, max 4096)" 2
+
+# === 4. Build JSON body via jq (NEVER string-interpolate user text) =======
+# jq --arg treats every value as opaque data: $(…), backticks, ${…}, quotes,
+# backslashes — all passed through literally. An injected message like
+# '$(touch /tmp/PWNED)' is inert; it becomes the string value in JSON.
+command -v jq >/dev/null 2>&1 || die "jq required but not on PATH"
+
+if [[ -n "$TITLE" ]]; then
+  JSON_BODY="$(jq -n --arg msg "$MSG" --arg title "$TITLE" \
+    '{message: $msg, title: $title}')"
+else
+  JSON_BODY="$(jq -n --arg msg "$MSG" '{message: $msg}')"
+fi
+
+# === 5. POST to Pulse /notify =============================================
+command -v curl >/dev/null 2>&1 || die "curl required but not on PATH"
+
+HTTP_STATUS="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  --data "$JSON_BODY" \
+  "${PULSE_URL}/notify")" || die "curl failed" 1
+
+echo "HTTP ${HTTP_STATUS}"
+
+case "$HTTP_STATUS" in
+  2*) ;;
+  *) die "Pulse returned non-2xx status: ${HTTP_STATUS}" 1 ;;
+esac
