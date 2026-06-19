@@ -25,6 +25,9 @@ from typing import Optional
 
 DEFAULT_CACHE = "~/.claude/PAI/MEMORY/STATE/usage-cache.json"
 DEFAULT_SNAPSHOT = "~/.hermes/state/pai-cost-snapshots.jsonl"
+# Cron note: paths above use ~ via expanduser, which requires $HOME.
+# Cron environments often strip $HOME. Cron entries MUST export HOME=/home/pai
+# (or the PAI user's home directory) before invoking this script.
 
 STALENESS_WARN_SECONDS = 15 * 60  # 15 min per SKILL.md
 
@@ -88,8 +91,16 @@ def extract_metrics(cache: dict) -> dict:
     sonnet = rl.get("seven_day_sonnet") or {}
     extra = rl.get("extra_usage") or {}
 
-    used = extra.get("used_credits") or 0
-    limit = extra.get("monthly_limit") or 0
+    _used_raw = extra.get("used_credits")
+    _limit_raw = extra.get("monthly_limit")
+    try:
+        used = float(_used_raw) if _used_raw is not None else 0.0
+    except (TypeError, ValueError):
+        used = 0.0
+    try:
+        limit = float(_limit_raw) if _limit_raw is not None else 0.0
+    except (TypeError, ValueError):
+        limit = 0.0
     extra_pct = round(100 * used / limit, 1) if limit else 0.0
 
     return {

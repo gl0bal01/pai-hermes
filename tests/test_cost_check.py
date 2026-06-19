@@ -196,6 +196,48 @@ def test_cache_age_seconds_fresh_file_under_one_second(tmp_path):
     assert age < 5  # should be near-zero
 
 
+# ----------------------- extract_metrics() string-typed credits (P1) ----
+
+def test_extract_metrics_string_used_and_limit():
+    """String values from JSON cache must not raise TypeError."""
+    cache = {"rate_limits": {"extra_usage": {"used_credits": "5", "monthly_limit": "100"}}}
+    m = cc.extract_metrics(cache)
+    assert m["extra_credits_used_pct"] == 5.0
+    assert m["extra_credits_used"] == 5.0
+    assert m["extra_credits_limit"] == 100.0
+
+
+def test_extract_metrics_string_zero_limit_no_crash():
+    """String '0' limit must not crash (zero-division guard)."""
+    cache = {"rate_limits": {"extra_usage": {"used_credits": "5", "monthly_limit": "0"}}}
+    m = cc.extract_metrics(cache)
+    assert m["extra_credits_used_pct"] == 0.0
+
+
+def test_extract_metrics_empty_string_credits():
+    """Empty string for used_credits/monthly_limit must be treated as 0."""
+    cache = {"rate_limits": {"extra_usage": {"used_credits": "", "monthly_limit": ""}}}
+    m = cc.extract_metrics(cache)
+    assert m["extra_credits_used_pct"] == 0.0
+    assert m["extra_credits_used"] == 0.0
+    assert m["extra_credits_limit"] == 0.0
+
+
+def test_extract_metrics_unparseable_string_credits():
+    """Garbage string values must be treated as 0, no exception."""
+    cache = {"rate_limits": {"extra_usage": {"used_credits": "abc", "monthly_limit": "xyz"}}}
+    m = cc.extract_metrics(cache)
+    assert m["extra_credits_used_pct"] == 0.0
+    assert m["extra_credits_used"] == 0.0
+
+
+def test_extract_metrics_string_credits_with_valid_numeric_limit():
+    """Mixed: string used, numeric limit — must compute correctly."""
+    cache = {"rate_limits": {"extra_usage": {"used_credits": "25", "monthly_limit": 200}}}
+    m = cc.extract_metrics(cache)
+    assert m["extra_credits_used_pct"] == 12.5
+
+
 # ---------------------------------------------------- end-to-end smoke ----
 
 def test_end_to_end_with_synthetic_cache(tmp_path):
