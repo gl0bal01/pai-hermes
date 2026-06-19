@@ -75,8 +75,22 @@ SKILLS=(omc pai-pulse pai-watch pai-doctor pai-accept pai-cost-tracker pai-statu
 }
 
 @test "pai-accept-guard refuses non-SSH invocation (exit 77)" {
-  unset SSH_TTY SSH_CONNECTION SSH_CLIENT PAI_LOCAL_OVERRIDE
-  run "$REPO/bin/pai-accept-guard" fake-id
+  # Deterministically simulate the no-SSH case; no local-accept marker present.
+  PAI_ACCEPT_ASSUME_NO_SSH=1 \
+  PAI_ACCEPT_LOCAL_ALLOW=/nonexistent/marker \
+    run "$REPO/bin/pai-accept-guard" fake-id
+  [ "$status" -eq 77 ]
+}
+
+@test "pai-accept-guard ignores spoofed SSH_* env (forge-resistant, exit 77)" {
+  # G1: an LLM can set SSH_* but has no sshd in its process ancestry and cannot
+  # create the root-owned marker. Spoofed env must NOT authorize the mutation.
+  SSH_TTY=/dev/pts/9 \
+  SSH_CONNECTION="1.2.3.4 222 5.6.7.8 22" \
+  SSH_CLIENT="1.2.3.4 222 22" \
+  PAI_ACCEPT_ASSUME_NO_SSH=1 \
+  PAI_ACCEPT_LOCAL_ALLOW=/nonexistent/marker \
+    run "$REPO/bin/pai-accept-guard" fake-id
   [ "$status" -eq 77 ]
 }
 
@@ -112,7 +126,8 @@ SKILLS=(omc pai-pulse pai-watch pai-doctor pai-accept pai-cost-tracker pai-statu
         '{repo:$repo, targetSha:$sha, commits:$commits, status:"pending"}' \
     > "$PROPS/${ID}.json"
 
-  PAI_LOCAL_OVERRIDE=1 \
+  touch "$WORK/allow" && chmod 600 "$WORK/allow"
+  PAI_ACCEPT_LOCAL_ALLOW="$WORK/allow" \
   PAI_PROPOSALS_DIR="$PROPS" \
   PAI_PATHS_ENV="$PATHS_ENV" \
   PAI_COLLAB_DIR="$COLLAB" \
@@ -142,7 +157,8 @@ SKILLS=(omc pai-pulse pai-watch pai-doctor pai-accept pai-cost-tracker pai-statu
   LOCK_LINK="$WORK/lock-symlink"
   ln -s "$TARGET" "$LOCK_LINK"
 
-  PAI_LOCAL_OVERRIDE=1 \
+  touch "$WORK/allow" && chmod 600 "$WORK/allow"
+  PAI_ACCEPT_LOCAL_ALLOW="$WORK/allow" \
   PAI_PROPOSALS_DIR="$WORK/nope" \
   PAI_PATHS_ENV="$WORK/nope.env" \
   PAI_ACCEPT_LOCK="$LOCK_LINK" \
@@ -179,4 +195,59 @@ assert callable(mod.main)
 assert callable(mod.classify)
 assert callable(mod.compose_voice)
 "
+}
+
+@test "pai-accept-guard preserves other pins; matches keys as fixed strings (G2/G3)" {
+  # G2: a grep read error must never wipe unrelated pins.
+  # G3: a repo name with '.' must not act as a regex wildcard and strip others.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  WORK="$(mktemp -d)"
+  PROPS="$WORK/proposals"; mkdir -p "$PROPS"
+  PATHS_ENV="$WORK/paths.env"
+  # PAI_FOOXBAR_SHA would be stripped by a regex `^PAI_FOO.BAR_SHA=` (old bug).
+  printf 'PAI_OTHER_SHA=1111111\nPAI_FOOXBAR_SHA=2222222\n' > "$PATHS_ENV"
+  ID="test-2026-02-02T00-00-00"
+  jq -n --arg repo "foo.bar" --arg sha "abcdef1234567" --arg commits "c" \
+     '{repo:$repo, targetSha:$sha, commits:$commits, status:"pending"}' \
+     > "$PROPS/${ID}.json"
+  touch "$WORK/allow" && chmod 600 "$WORK/allow"
+  PAI_ACCEPT_LOCAL_ALLOW="$WORK/allow" \
+  PAI_PROPOSALS_DIR="$PROPS" \
+  PAI_PATHS_ENV="$PATHS_ENV" \
+  PAI_ACCEPT_LOCK="$WORK/lock" \
+    run "$REPO/bin/pai-accept-guard" "$ID"
+  [ "$status" -eq 0 ]
+  # foo.bar normalizes to PAI_FOO_BAR_SHA; the unrelated pins must survive.
+  grep -qF 'PAI_OTHER_SHA=1111111' "$PATHS_ENV"
+  grep -qF 'PAI_FOOXBAR_SHA=2222222' "$PATHS_ENV"
+  grep -qF 'PAI_FOO_BAR_SHA=abcdef1234567' "$PATHS_ENV"
+  rm -rf "$WORK"
+}
+
+@test "pai-accept-guard neutralizes ~~~ fence-break in commit subjects (G5)" {
+  # An upstream commit subject containing ~~~ must not break out of the review
+  # code block and inject markdown. $LOG is rendered as an indented code block.
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  WORK="$(mktemp -d)"
+  PROPS="$WORK/proposals"; COLLAB="$WORK/collab"; ARC="$COLLAB/projects/arc/reviews"
+  mkdir -p "$PROPS" "$ARC"
+  PATHS_ENV="$WORK/paths.env"; : > "$PATHS_ENV"
+  ID="test-2026-03-03T00-00-00"
+  POISON=$'~~~\n## INJECTED HEADING\n[evil](http://evil)'
+  jq -n --arg repo "fakerepo" --arg sha "abcdef1234567" --arg commits "$POISON" \
+     '{repo:$repo, targetSha:$sha, commits:$commits, status:"pending"}' \
+     > "$PROPS/${ID}.json"
+  touch "$WORK/allow" && chmod 600 "$WORK/allow"
+  PAI_ACCEPT_LOCAL_ALLOW="$WORK/allow" \
+  PAI_PROPOSALS_DIR="$PROPS" \
+  PAI_PATHS_ENV="$PATHS_ENV" \
+  PAI_COLLAB_DIR="$COLLAB" \
+  PAI_ACCEPT_LOCK="$WORK/lock" \
+    run "$REPO/bin/pai-accept-guard" "$ID"
+  [ "$status" -eq 0 ]
+  REVIEW="$(ls "$ARC"/*.md | head -1)"
+  # The injected heading stays indented (inside the code block) — not a heading.
+  grep -qE '^    ## INJECTED HEADING' "$REVIEW"
+  ! grep -qE '^## INJECTED HEADING' "$REVIEW"
+  rm -rf "$WORK"
 }

@@ -17,19 +17,20 @@ User intent (must be SSH session):
 
 `pai-accept` is the **only mutation** that touches `paths.env`. Plan v5 §13 ADR + pai-anywhere CLAUDE.md require:
 
-1. **SSH-only** — Hermes refuses to run pai-accept if invocation source is not local TTY.
+1. **Real-SSH-session-only** — the guard authorizes only when `sshd` is in the
+   invoking process's ancestry (verified via `/proc`, *not* the spoofable
+   `SSH_*` env vars). Hermes — a non-root LLM with no `sshd` ancestor — cannot
+   pass it, even if prompt-injected. Remote use still works: open a **Tailscale
+   SSH** session from any device and the check passes.
 2. **No gateway exposure** — never callable via pai-anywhere gateway proxy.
 3. **No Pulse route** — never callable via Pulse HTTP.
-4. **No remote platform** — Telegram/Discord/Signal/WhatsApp triggers explicitly rejected.
+4. **No remote platform** — Telegram/Discord/Signal/WhatsApp triggers rejected.
 5. **Audit logged** — every acceptance writes JSONL audit + arc markdown review.
 
-Hermes pre-flight check (in skill body):
-```
-if [[ -z "$SSH_TTY" && -z "$PAI_LOCAL_OVERRIDE" ]]; then
-  echo "pai-accept refused: SSH-only invocation"
-  exit 1
-fi
-```
+The boundary is enforced in `bin/pai-accept-guard` (shell), not in this
+markdown. Do not reimplement the check inline — invoke the guard (see Execution).
+Break-glass for non-SSH local admin/CI is a **root-owned** marker file
+(`/etc/pai/local-accept.allow`, mode 0600) that a non-root process cannot forge.
 
 ## Algorithm
 
@@ -67,9 +68,9 @@ sudo ln -sf $PAI_PROJET_ROOT/pai-hermes/bin/pai-accept-guard /usr/local/bin/pai-
 
 The guard (`bin/pai-accept-guard` in this repo) enforces:
 
-1. **SSH-only** — refuses unless `SSH_TTY`, `SSH_CONNECTION`, or `SSH_CLIENT` is set. Exit 77 (EX_NOPERM) otherwise. Override only via `PAI_LOCAL_OVERRIDE=1` env (never via CLI flag).
+1. **Real-SSH-session-only** — authorizes only when `sshd` is in the process ancestry (forge-resistant; spoofable `SSH_*` env vars are ignored). Exit 77 (EX_NOPERM) otherwise. Local/CI break-glass is a root-owned `/etc/pai/local-accept.allow` (mode 0600), never an env flag.
 2. **Input validation** — proposal id, repo name, and SHA must match strict regex. Exit 65 (EX_DATAERR) on mismatch.
-3. **flock** — exclusive lock on `${PAI_ACCEPT_LOCK:-/tmp/pai-accept.lock}` with 30s timeout (configurable via `PAI_ACCEPT_LOCK_TIMEOUT`). Exit 75 (EX_TEMPFAIL) if another accept in flight.
+3. **flock** — exclusive lock under the user runtime dir (`${XDG_RUNTIME_DIR}/pai-accept/lock`, override via `PAI_ACCEPT_LOCK`) with a 30s timeout (`PAI_ACCEPT_LOCK_TIMEOUT`). Exit 75 (EX_TEMPFAIL) if another accept is in flight.
 4. **Atomic paths.env mutation** — write to tmp file (same dir), preserve permissions, then `mv` (atomic on same filesystem).
 5. **Atomic proposal status update** — same tmp+mv pattern, prevents partial writes.
 6. **Optional arc review** — only if `$PAI_COLLAB_DIR/projects/arc/reviews/` exists and writable. Skipped silently otherwise.
@@ -78,11 +79,10 @@ If you really want raw bash inline (NOT recommended — bypasses guard), see sou
 
 ## Rollback
 
-If acceptance was wrong:
+If acceptance was wrong, invoke the guard with the rollback proposal id — never mutate paths.env directly:
+
 ```bash
-# Restore previous SHA pin via pai-paths skill (separate)
-# Or manually:
-sed -i '/^PAI_<REPO>_SHA=/d' /etc/pai/paths.env
+pai-accept-guard <rollback-proposal-id>
 ```
 
 Granular rollback flow (per plan v5 §12):

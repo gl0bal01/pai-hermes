@@ -14,8 +14,8 @@
 #   2   bad arguments / invalid proposal
 #   65  EX_DATAERR — invalid SHA / repo name
 #   75  EX_TEMPFAIL — flock timeout (another pai-accept in flight)
-#   77  EX_NOPERM — not running under SSH (and PAI_LOCAL_OVERRIDE unset),
-#                  or path escape attempt when running as root
+#   77  EX_NOPERM — not a real SSH session (no sshd in process ancestry) and no
+#                  root-owned local-accept marker; or a path-escape attempt as root
 #
 # shellcheck shell=bash
 set -euo pipefail
@@ -41,12 +41,64 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# === 1. SSH-only enforcement ==============================================
-# Allow override only via explicit env, never via CLI flag (harder for LLM
-# agents to invoke accidentally).
-if [[ -z "${SSH_TTY:-}${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]] && \
-   [[ -z "${PAI_LOCAL_OVERRIDE:-}" ]]; then
-  die "refused: not running under SSH. Set PAI_LOCAL_OVERRIDE=1 to bypass for local dev." 77
+# === 1. Real-SSH-session enforcement (forge-resistant) ====================
+# pai-accept is the highest-privilege mutation: it pins trusted SHAs in
+# /etc/pai/paths.env. It must be initiated by a human at a real SSH session,
+# never by Hermes — an LLM reachable over remote chat platforms that could be
+# prompt-injected into accepting a malicious upstream bump.
+#
+# We do NOT trust SSH_* env vars: an LLM controls its child-process env and can
+# forge them. Instead we verify the real process ancestry up to sshd, which the
+# agent's process tree never has. This stays "usable from anywhere": open a
+# Tailscale SSH session from your phone/laptop and the check passes.
+#
+# Break-glass for non-SSH local admin / CI is a ROOT-OWNED marker file
+# (/etc/pai/local-accept.allow, regular file, uid 0, mode 0600). A non-root
+# process — including Hermes — cannot create it. Tests (non-root) may point the
+# marker at a temp path via PAI_ACCEPT_LOCAL_ALLOW; that override is ignored
+# when running as root, where the marker path is fixed.
+has_sshd_ancestor() {
+  # PAI_ACCEPT_ASSUME_NO_SSH only ever DENIES (tightens) — safe test aid to
+  # simulate the no-SSH attacker case deterministically.
+  [[ "${PAI_ACCEPT_ASSUME_NO_SSH:-}" == "1" ]] && return 1
+  local pid="${PPID}" depth=0 comm ppid
+  while [[ "${pid}" -gt 1 && "${depth}" -lt 32 ]]; do
+    [[ -r "/proc/${pid}/comm" ]] || return 1
+    comm="$(tr -d '\0' < "/proc/${pid}/comm" 2>/dev/null || echo '')"
+    case "${comm}" in
+      sshd|sshd-session) return 0 ;;
+    esac
+    ppid="$(awk '/^PPid:/{print $2; exit}' "/proc/${pid}/status" 2>/dev/null || echo 1)"
+    [[ "${ppid}" =~ ^[0-9]+$ ]] || return 1
+    pid="${ppid}"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+local_allow_ok() {
+  # Marker path may be overridden for tests/dev. The security does NOT rely on
+  # the path being fixed: when running as root (the only context that can mutate
+  # the real /etc/pai/paths.env) the marker must be root-owned 0600, which a
+  # non-root process such as Hermes cannot forge. At non-root the guard can't
+  # write the real paths.env anyway, so an attacker-pointed marker gains nothing.
+  local marker="${PAI_ACCEPT_LOCAL_ALLOW:-/etc/pai/local-accept.allow}"
+  [[ -e "${marker}" ]] || return 1
+  [[ -f "${marker}" && ! -L "${marker}" ]] || die "local-accept marker must be a regular file: ${marker}" 77
+  # When this gate authorizes a ROOT mutation, demand strict root ownership +
+  # 0600 so only a real root admin could have created it.
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    local owner mode
+    owner="$(stat -c '%u' "${marker}" 2>/dev/null || echo -1)"
+    mode="$(stat -c '%a' "${marker}" 2>/dev/null || echo 777)"
+    [[ "${owner}" == "0" ]]   || die "local-accept marker must be owned by root: ${marker}" 77
+    [[ "${mode}"  == "600" ]] || die "local-accept marker must be mode 0600: ${marker}" 77
+  fi
+  return 0
+}
+
+if ! has_sshd_ancestor && ! local_allow_ok; then
+  die "refused: pai-accept needs a real SSH session (Tailscale SSH works from anywhere). Break-glass: create root-owned /etc/pai/local-accept.allow (mode 0600)." 77
 fi
 
 # === 2. Args ==============================================================
@@ -72,11 +124,17 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   esac
 fi
 
-# Resolve symlinks; refuse path escape via symlink swap.
-if command -v readlink >/dev/null 2>&1; then
+# Resolve symlinks; refuse path escape via symlink swap (root only). Both the
+# paths.env target AND the proposals dir are checked — a symlinked proposals dir
+# could otherwise feed a forged proposal into a root-privileged pin write.
+if command -v readlink >/dev/null 2>&1 && [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   PATHS_ENV_RESOLVED="$(readlink -f "$PATHS_ENV" 2>/dev/null || echo "$PATHS_ENV")"
-  if [[ "${EUID:-$(id -u)}" -eq 0 && "$PATHS_ENV_RESOLVED" != "/etc/pai/paths.env" ]]; then
+  if [[ "$PATHS_ENV_RESOLVED" != "/etc/pai/paths.env" ]]; then
     die "refused: paths.env symlink escape detected (resolves to $PATHS_ENV_RESOLVED)" 77
+  fi
+  PROPOSALS_DIR_RESOLVED="$(readlink -f "$PROPOSALS_DIR" 2>/dev/null || echo "$PROPOSALS_DIR")"
+  if [[ "$PROPOSALS_DIR_RESOLVED" != "/var/lib/pai-anywhere/proposals" ]]; then
+    die "refused: proposals dir symlink escape detected (resolves to $PROPOSALS_DIR_RESOLVED)" 77
   fi
 fi
 
@@ -98,7 +156,11 @@ LOG="$(jq -r .commits "$PROPOSAL")"
 [[ -n "$SHA" && "$SHA" != "null" ]] || die "proposal missing .targetSha" 65
 [[ "$SHA" =~ ^[a-f0-9]{7,40}$ ]] || die "invalid SHA format: $SHA" 65
 
-KEY="PAI_$(echo "$REPO" | tr 'a-z-' 'A-Z_')_SHA"
+# Normalize repo name to an env key: uppercase, and both '-' and '.' → '_'.
+# Watched repo names must be unique under this normalization (the curated
+# PAI_WATCH_SOURCES set is). The '=' filter below is a FIXED-STRING match, so a
+# '.' surviving in the key could no longer act as a regex wildcard regardless.
+KEY="PAI_$(printf '%s' "$REPO" | tr 'a-z.-' 'A-Z__')_SHA"
 
 # === 4. Atomic paths.env update under flock ===============================
 # Lock dir in user runtime dir (M2): avoids /tmp symlink race that could
@@ -106,9 +168,9 @@ KEY="PAI_$(echo "$REPO" | tr 'a-z-' 'A-Z_')_SHA"
 LOCK_DEFAULT_DIR="${XDG_RUNTIME_DIR:-/run/user/${EUID:-$(id -u)}}/pai-accept"
 LOCK="${PAI_ACCEPT_LOCK:-${LOCK_DEFAULT_DIR}/lock}"
 LOCK_DIR="$(dirname "$LOCK")"
-# SC2174: -m with -p only applies to deepest dir, so explicit chmod after.
-mkdir -p "$LOCK_DIR" 2>/dev/null || die "cannot create lock dir: $LOCK_DIR"
-chmod 700 "$LOCK_DIR" 2>/dev/null || true
+# `install -d -m 700` atomically creates the dir with the right mode (no
+# mkdir-then-chmod TOCTOU; fails cleanly if the path exists as a non-directory).
+install -d -m 700 "$LOCK_DIR" 2>/dev/null || die "cannot create lock dir: $LOCK_DIR"
 # Refuse if LOCK is an existing symlink (anti-swap).
 [[ -L "$LOCK" ]] && die "lock path is a symlink, refusing: $LOCK" 77
 exec 9>"$LOCK" || die "cannot open lock: $LOCK"
@@ -116,7 +178,15 @@ flock -w "${PAI_ACCEPT_LOCK_TIMEOUT:-30}" 9 || die "another pai-accept in flight
 
 TMP="$(mktemp "${PATHS_ENV}.XXXXXX")"
 CLEANUP+=("$TMP")
-grep -v "^${KEY}=" "$PATHS_ENV" > "$TMP" || true
+# Drop any existing line for this key, preserving all OTHER pins. Use awk with a
+# FIXED-STRING prefix test (not a grep regex): a repo name with regex
+# metacharacters can't strip unrelated keys. awk returns 0 even on no-match, so a
+# non-zero rc means a real read error — refuse rather than silently wipe pins.
+set +e
+awk -v k="${KEY}=" 'index($0, k) != 1' "$PATHS_ENV" > "$TMP"
+awk_rc=$?
+set -e
+[[ "${awk_rc}" -eq 0 ]] || die "failed reading ${PATHS_ENV} (rc=${awk_rc}); refusing to drop pins" 1
 printf '%s=%s\n' "$KEY" "$SHA" >> "$TMP"
 
 # Preserve permissions of original
@@ -153,11 +223,11 @@ if [[ -n "$ARC_BASE" && -d "$ARC_DIR" && -w "$ARC_DIR" ]]; then
     printf '**Accepted**: %s\n' "$TS"
     printf '**Source**: pai-watch auto-detect\n\n'
     printf '## Commits\n\n'
-    # Use ~~~ fence (less common in commit subjects than ```) to reduce
-    # fence-break risk; still treat $LOG as opaque untrusted text.
-    printf '~~~\n'
-    printf '%s\n' "$LOG"
-    printf '~~~\n\n'
+    # Render $LOG (untrusted upstream commit subjects) as a markdown INDENTED
+    # code block — every line prefixed with 4 spaces. There is no fence for a
+    # subject containing ~~~ or ``` to break out of, so it cannot inject markdown.
+    printf '%s\n' "$LOG" | sed 's/^/    /'
+    printf '\n'
     printf '## Review\n\n'
     # shellcheck disable=SC2016  # backticks are markdown code-span, not shell sub
     printf 'Auto-generated via `pai-accept-guard %s`. Human approval recorded as SSH session on VPS.\n' "$ID"
