@@ -2,7 +2,7 @@
 
 > Build-time briefing for AI agents working on this repo. Read before touching skill content.
 
-**Phase**: v0.1.2 (2026-05-16).
+**Phase**: v0.1.3 (2026-06-19).
 
 ## Mission
 

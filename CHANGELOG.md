@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.3] — 2026-06-19 — Multi-model review hardening
+
+Addresses a 4-reviewer (codex / deepseek / glm / kimi) audit of 0.1.2.
+Headline: the SSH-only gate is now actually forge-resistant. No CRITICAL.
+
+### Fixed (HIGH)
+
+- **`bin/pai-accept-guard` SSH gate was forgeable (G1)**: the gate trusted `SSH_*` env vars (which an LLM controls in its own child env) plus a plain `PAI_LOCAL_OVERRIDE=1` bypass, so a prompt-injected Hermes could defeat the documented "never callable from a remote platform" guarantee. Replaced with a process-ancestry check (an `sshd`/`sshd-session` parent, walked via `/proc`) that the agent's process tree never has. Remote use is unchanged — a Tailscale SSH session satisfies it. The env bypass is gone; the only non-SSH escape hatch is a root-owned `/etc/pai/local-accept.allow` (mode 0600) a non-root process can't forge. New bats regressions for env-spoof refusal; CLAUDE.md/SKILL.md realigned to the enforced model.
+- **`bin/pai-accept-guard` could wipe all SHA pins (G2/G3)**: `grep -v … || true` conflated grep's no-match (rc 1) with a read error (rc ≥ 2), so an unreadable `paths.env` mid-run replaced the file with a single line, dropping every other `PAI_*_SHA` pin. Rewritten with `awk` (rc 0 on no-match); a real error now aborts. The key filter is now a fixed-string prefix (was a grep regex, so a repo name containing `.` could strip unrelated keys). New pin-preservation regression.
+
+### Fixed (MEDIUM)
+
+- **Config patching extracted + made safe (H9/H7/H2/H5)**: the duplicated inline `python3 -c` heredoc is now `tools/patch_hermes_config.py`. ruamel round-trip preserves user comments/anchors (PyYAML `safe_dump` destroyed them — H7); writes are atomic (`mkstemp`+`fsync`+`os.replace`, re-parsed before swap — never truncate-in-place, H2); the config path comes from argv/env as a `Path`, never interpolated into Python source (H5).
+- **`bin/pai-pulse-send` wrapper (S7)**: pai-pulse's safe JSON pattern was prose only. Added an enforcing wrapper — JSON built solely via `jq --arg`, Pulse URL restricted to loopback http (also closes the pai-doctor SSRF), length/NUL guards. SKILL.md now mandates it.
+- **`pai-watch` repo-name validation (S6)**: `git -C <name>` ran on unvalidated `$PAI_WATCH_SOURCES` entries. The skill now enforces `^[A-Za-z0-9._-]+$`, confines the resolved path under `$PAI_PROJET_ROOT`, and sets `GIT_CONFIG_GLOBAL=/dev/null`.
+- **`pai-accept-guard` proposals-dir symlink escape (G7)**: the root-only `readlink -f` escape check now also covers `PROPOSALS_DIR`, not just `paths.env`.
+- **`install.sh` safety (H3/H1)**: single-flight `flock` + ownership guard; refuse a symlink backup path. **Arc-review fence escape (G5)**: untrusted commit subjects are rendered as an indented code block (a `~~~` in a subject can no longer break out). **`template_vars` injection removed (H4)**.
+
+### Fixed (LOW)
+
+- **`tools/cost_check.py` string-credit crash (P1)**: `extract_metrics` passed string `used_credits`/`monthly_limit` straight into arithmetic → `TypeError`, crashing the silent cron. Now coerced with `float()` + try/except like `pct()`.
+- **Stale docs (S1–S4, S8–S12)**: dead `cron/*.yaml` references replaced with the jobs.json flow; cost thresholds single-sourced on `cost_check.py` (5h alert 80 / block 95, 7d alert 85); removed `api_spend_month_usd` / `ANTHROPIC_ADMIN_API_KEY`; pai-doctor probes target jobs.json and dropped the retired `bin/pai doctor` delegation; `HOME=$HOME` (was `/home/pai`); README status → 0.1.3.
+- **Installer polish (H6/H8/G6)**: true-atomic skill symlink (`ln -s … && mv -T`); `mktemp` backup instead of a fixed `.bak` clobber; `install -d -m 700` for the lock dir (no mkdir+chmod TOCTOU).
+
+### Tooling
+
+- New dependency: `ruamel.yaml` (round-trip YAML) — `install.sh` auto-installs it (pip `--user`, PEP-668 fallback) and fails loudly if unavailable.
+- Tests: +28 (guard env-spoof / pin-preservation / fence; cost string inputs; pulse wrapper injection / SSRF; install append-not-replace / comment-survival / H5). bats 40, pytest 32, shellcheck clean.
+
 ## [0.1.2] — 2026-05-31 — Security review hardening
 
 Addresses full-tree security review of 0.1.1. 2 HIGH + 5 MEDIUM + 5 LOW + 1 INFO findings resolved. No CRITICAL.
