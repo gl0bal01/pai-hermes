@@ -11,6 +11,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 HERMES_SKILLS_DIR="$HERMES_HOME/skills/pai-hermes"
+PATCH_TOOL="$REPO_DIR/tools/patch_hermes_config.py"
 
 echo "[pai-hermes uninstall] removing wiring..."
 
@@ -22,36 +23,40 @@ elif [[ -e "$HERMES_SKILLS_DIR" ]]; then
   echo "  WARN: $HERMES_SKILLS_DIR exists but is not a symlink — leaving alone"
 fi
 
-# === 2. Remove external_dirs entry from config.yaml (pyyaml) =============
+# === 2. Remove external_dirs entry from config.yaml (ruamel round-trip) ===
+# H5: path passed as arg/env to the external tool, never interpolated into a
+# `python3 -c` string. H2: the tool writes atomically (temp in same dir, fsync,
+# os.replace) and re-parses before swapping.
 if [[ -f "$HERMES_CONFIG" && ! -L "$HERMES_CONFIG" ]]; then
-  BACKUP="${HERMES_CONFIG}.bak"
-  # L2 fix: refuse if backup target is a symlink (could overwrite arbitrary
-  # file the user can write). Use --no-dereference + --remove-destination
-  # so cp creates a regular file even if BACKUP currently exists.
-  if [[ -L "$BACKUP" ]]; then
-    echo "ERROR: $BACKUP is a symlink, refusing to overwrite" >&2
+  [[ -f "$PATCH_TOOL" ]] || { echo "ERROR: $PATCH_TOOL missing" >&2; exit 1; }
+  python3 -c "import ruamel.yaml" 2>/dev/null || {
+    echo "ERROR: ruamel.yaml required to edit config.yaml (pip install --user ruamel.yaml)." >&2
     exit 1
-  fi
+  }
+  # H8: avoid the fixed `${HERMES_CONFIG}.bak` TOCTOU/clobber. Use a unique
+  # mktemp-named backup in the same directory (set -C also guards against an
+  # accidental clobber of an existing path via the noclobber redirect).
+  BACKUP="$(set -C; mktemp "${HERMES_CONFIG}.uninstall-bak.XXXXXX")" || {
+    echo "ERROR: could not create backup temp file next to $HERMES_CONFIG" >&2
+    exit 1
+  }
   cp --no-dereference --remove-destination "$HERMES_CONFIG" "$BACKUP"
-  if HERMES_CONFIG="$HERMES_CONFIG" SKILL_DIR="$HERMES_SKILLS_DIR" python3 <<'PYEOF'
-import os, sys, yaml, pathlib
-cfg = pathlib.Path(os.environ["HERMES_CONFIG"])
-target = os.environ["SKILL_DIR"]
-data = yaml.safe_load(cfg.read_text()) or {}
-skills = data.get("skills") or {}
-ext = skills.get("external_dirs") or []
-if target in ext:
-    ext = [e for e in ext if e != target]
-    skills["external_dirs"] = ext
-    data["skills"] = skills
-    cfg.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True))
-    print("REMOVED")
-else:
-    print("NOT_PRESENT")
-PYEOF
-  then
-    # validate post-edit
-    if python3 -c "import yaml; yaml.safe_load(open('$HERMES_CONFIG').read())" 2>/dev/null; then
+  validate_yaml() {
+    HERMES_CONFIG="$HERMES_CONFIG" python3 -c \
+      'import os; from ruamel.yaml import YAML; YAML(typ="rt").load(open(os.environ["HERMES_CONFIG"]).read())' \
+      2>/dev/null
+  }
+  if PATCH_OUT=$(HERMES_CONFIG="$HERMES_CONFIG" python3 "$PATCH_TOOL" \
+        --remove-external-dir "$HERMES_SKILLS_DIR" 2>&1); then
+    case "$PATCH_OUT" in
+      REMOVED|NOT_PRESENT) : ;;
+      *)
+        echo "ERROR: unexpected patcher output: $PATCH_OUT — restoring backup" >&2
+        mv "$BACKUP" "$HERMES_CONFIG"
+        exit 1
+        ;;
+    esac
+    if validate_yaml; then
       echo "  removed external_dirs entry from $HERMES_CONFIG (backup: $BACKUP)"
     else
       echo "ERROR: config.yaml broke after uninstall edit — restoring backup" >&2
@@ -59,7 +64,7 @@ PYEOF
       exit 1
     fi
   else
-    echo "ERROR: uninstall edit failed — restoring backup" >&2
+    echo "ERROR: uninstall edit failed ($PATCH_OUT) — restoring backup" >&2
     mv "$BACKUP" "$HERMES_CONFIG"
     exit 1
   fi
