@@ -1,10 +1,12 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.4] — 2026-06-22 — pai-watch works out-of-box
 
 ### Fixed
 
 - **`pai-watch` dead on a fresh install**: the skill defaulted `PAI_PROJET_ROOT` to `/opt/pai-projet` (rarely the real clone root) and `PAI_PROPOSALS_DIR` to `/var/lib/pai-anywhere/proposals` (owned by pai-anywhere's `pai` user, so the Hermes gateway — running as the human user — could never write it). Result: the hourly watcher silently no-op'd and proposals were dropped. `PAI_PROPOSALS_DIR` now defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/pai-hermes/proposals` (always gateway-writable, created on demand), and `install.sh` now auto-detects `PAI_PROJET_ROOT` (the parent of the checkout), narrows `PAI_WATCH_SOURCES` to repos that actually exist, writes all three to `$HERMES_HOME/pai-hermes.env`, and wires that as an `EnvironmentFile=` drop-in on the systemd `--user` gateway (printed instructions otherwise). `uninstall.sh` reverses the env file + drop-in. Skill/doc defaults realigned.
+- **`uninstall.sh` shellcheck SC2015**: the new gateway-restart cleanup used `is-active && restart || true`, which shellcheck (info level, as run in CI) flags because the `|| true` can fire when `is-active` succeeds but `restart` fails. Rewritten as an explicit `if … then … fi`.
+- **CI: `actions/checkout` bumped v4 → v7**: Node 20 reached end-of-life on the GitHub runners, so `checkout@v4` was being force-run on Node 24 with a deprecation warning. Now pinned to v7.
 
 ## [0.1.3] — 2026-06-19 — Multi-model review hardening
 

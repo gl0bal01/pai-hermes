@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| **Version** | v0.1.3 (2026-06-19) |
+| **Version** | v0.1.4 (2026-06-22) |
 | **License** | MIT |
 | **Language** | Markdown skills · Bash · a little Python |
 | **Status** | Skills + wrappers wired and tested; cron registered through Hermes |
