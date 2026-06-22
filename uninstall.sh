@@ -84,8 +84,9 @@ if [[ -f "$DROPIN" && ! -L "$DROPIN" ]]; then
   echo "  removed gateway drop-in $DROPIN"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload 2>/dev/null || true
-    systemctl --user is-active --quiet hermes-gateway.service \
-      && systemctl --user restart hermes-gateway.service 2>/dev/null || true
+    if systemctl --user is-active --quiet hermes-gateway.service; then
+      systemctl --user restart hermes-gateway.service 2>/dev/null || true
+    fi
   fi
 fi
 
