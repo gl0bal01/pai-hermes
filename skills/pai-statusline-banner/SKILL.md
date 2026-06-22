@@ -58,7 +58,7 @@ Top quote: "<from PAI Quote rotation>"
 | Env var | Default | Purpose |
 |---------|---------|---------|
 | `PAI_USAGE_CACHE` | `~/.claude/PAI/MEMORY/STATE/usage-cache.json` | usage source |
-| `PAI_PROPOSALS_DIR` | `/var/lib/pai-anywhere/proposals` | proposals dir |
+| `PAI_PROPOSALS_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/pai-hermes/proposals` | proposals dir (shared with `pai-watch`; set in `$HERMES_HOME/pai-hermes.env` by `install.sh`) |
 | `PAI_ALGO_MEMORY` | `~/.claude/PAI/MEMORY/SKILLS/Algorithm/` | mood / commits / learning |
 | `PAI_QUOTES_FILE` | `~/.claude/PAI/USER/SHARED/Quotes/quotes.jsonl` | quote pool |
 | `PAI_BANNER_TIME` | `18:00` | daily schedule (override via Hermes config) |
@@ -100,7 +100,7 @@ Skill chain pattern: banner is composer, others are providers.
 - Mobile push relies on Pulse `/notify` reaching mobile via Tailscale — verify with `pai-doctor` before scheduling.
 - Quote pool from PAI canonical may not exist on fresh install — fallback to empty quote section.
 - DAGrowth.ts mood may be macOS-only — gracefully skip if file absent.
-- Env vars `PAI_PROPOSALS_DIR`, `PAI_ALGO_MEMORY`, `PAI_QUOTES_FILE` must be operator-set; they are read as-is with no further validation. Recommended locations: under `~/.claude/` or `/var/lib/pai-anywhere/`.
+- `PAI_PROPOSALS_DIR` defaults to the Hermes user's state dir and is written to `$HERMES_HOME/pai-hermes.env` by `install.sh`. `PAI_ALGO_MEMORY` and `PAI_QUOTES_FILE` remain operator-set; they are read as-is with no further validation. Recommended locations: under `~/.claude/`.
 
 ## Cost
 

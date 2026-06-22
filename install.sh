@@ -152,6 +152,89 @@ else
   echo "  WARN: bats not installed, skipping validation"
 fi
 
+# === 3a. pai-watch runtime environment ====================================
+# pai-watch + pai-statusline-banner read PAI_PROJET_ROOT / PAI_PROPOSALS_DIR /
+# PAI_WATCH_SOURCES from the gateway's process environment. The historical skill
+# defaults (/opt/pai-projet, /var/lib/pai-anywhere/proposals) almost never match
+# a real host — and the latter is owned by pai-anywhere's `pai` user, unwritable
+# by the gateway — so pai-watch silently no-ops on a fresh install. Detect sane
+# values, persist them to an EnvironmentFile, and wire them into the systemd
+# --user gateway when that is how Hermes runs here. Idempotent.
+echo "[pai-hermes install] configuring pai-watch environment..."
+
+# Root: the parent of this checkout is the canonical pai-projet root when it
+# holds sibling sub-projects (or is literally named pai-projet); else fall back
+# to the documented default.
+parent_dir="$(dirname "$REPO_DIR")"
+if [[ -d "$parent_dir/Personal_AI_Infrastructure" || -d "$parent_dir/pai-anywhere" \
+      || "$(basename "$parent_dir")" == "pai-projet" ]]; then
+  PAI_PROJET_ROOT="$parent_dir"
+else
+  PAI_PROJET_ROOT="/opt/pai-projet"
+fi
+
+# Sources: keep only the default repos that actually exist as git clones, so the
+# hourly watcher never wastes a run on absent repos.
+PAI_WATCH_SOURCES=""
+for repo in oh-my-claudecode Personal_AI_Infrastructure pai-anywhere pai-review-mode; do
+  [[ -d "$PAI_PROJET_ROOT/$repo/.git" ]] && \
+    PAI_WATCH_SOURCES="${PAI_WATCH_SOURCES:+$PAI_WATCH_SOURCES }$repo"
+done
+
+# Proposals dir: Hermes-writable XDG state location, created now.
+PAI_PROPOSALS_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pai-hermes/proposals"
+mkdir -p "$PAI_PROPOSALS_DIR"
+
+# Persist as a systemd EnvironmentFile (KEY=VALUE; values with spaces need no
+# quoting in this format, unlike inline Environment= lines).
+ENV_FILE="$HERMES_HOME/pai-hermes.env"
+if [[ -L "$ENV_FILE" ]]; then
+  echo "ERROR: $ENV_FILE is a symlink, refusing to overwrite" >&2
+  exit 1
+fi
+( umask 077
+  cat > "$ENV_FILE" <<ENV
+# Written by pai-hermes install.sh — consumed by the Hermes gateway so pai-watch
+# and pai-statusline-banner resolve the right paths. Re-run install.sh to refresh.
+PAI_PROJET_ROOT=$PAI_PROJET_ROOT
+PAI_PROPOSALS_DIR=$PAI_PROPOSALS_DIR
+PAI_WATCH_SOURCES=$PAI_WATCH_SOURCES
+ENV
+)
+chmod 600 "$ENV_FILE"
+echo "  wrote $ENV_FILE"
+echo "    PAI_PROJET_ROOT=$PAI_PROJET_ROOT"
+echo "    PAI_PROPOSALS_DIR=$PAI_PROPOSALS_DIR"
+echo "    PAI_WATCH_SOURCES=${PAI_WATCH_SOURCES:-<none found>}"
+if [[ -z "$PAI_WATCH_SOURCES" ]]; then
+  echo "  WARN: no watch sources found under $PAI_PROJET_ROOT — clone repos there"
+  echo "        or edit PAI_WATCH_SOURCES in $ENV_FILE, then restart the gateway."
+fi
+
+# Wire into the systemd --user gateway when present (additive drop-in; reversed
+# by uninstall.sh). Non-systemd launches get printed instructions instead.
+GATEWAY_UNIT="hermes-gateway.service"
+if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$GATEWAY_UNIT" >/dev/null 2>&1; then
+  DROPIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${GATEWAY_UNIT}.d"
+  mkdir -p "$DROPIN_DIR"
+  cat > "$DROPIN_DIR/pai-hermes.conf" <<DROPIN
+[Service]
+EnvironmentFile=$ENV_FILE
+DROPIN
+  systemctl --user daemon-reload 2>/dev/null || true
+  if systemctl --user is-active --quiet "$GATEWAY_UNIT"; then
+    systemctl --user restart "$GATEWAY_UNIT" 2>/dev/null \
+      && echo "  wired EnvironmentFile into $GATEWAY_UNIT and restarted it" \
+      || echo "  wired EnvironmentFile into $GATEWAY_UNIT (manual restart needed)"
+  else
+    echo "  wired EnvironmentFile into $GATEWAY_UNIT (start it to apply)"
+  fi
+else
+  echo "  NOTE: Hermes gateway is not a systemd --user service here. Make your"
+  echo "        gateway load $ENV_FILE before launch, e.g.:"
+  echo "          set -a; . \"$ENV_FILE\"; set +a"
+fi
+
 # === 4. Cron registration instructions ====================================
 cat <<EOF
 
@@ -178,6 +261,7 @@ Expected: 3 jobs (pai-watch, pai-cost-tracker, pai-statusline-banner).
 ═══════════════════════════════════════════════════════════════════
 
 Other follow-ups:
+  - pai-watch env written to: $ENV_FILE (edit + restart gateway to change roots/sources)
   - Restart Hermes:           pkill hermes && hermes
   - Verify skills loaded:     hermes -> /skills | grep pai
   - Run pai-doctor:           hermes -> 'pai doctor'

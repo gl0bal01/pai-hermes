@@ -70,6 +70,25 @@ if [[ -f "$HERMES_CONFIG" && ! -L "$HERMES_CONFIG" ]]; then
   fi
 fi
 
+# === 2a. Remove pai-watch env file + gateway drop-in =====================
+# Reverses install.sh's "3a. pai-watch runtime environment" step. The proposals
+# dir under XDG state is left in place (it may hold proposals; user data).
+ENV_FILE="$HERMES_HOME/pai-hermes.env"
+if [[ -f "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
+  rm -f "$ENV_FILE"
+  echo "  removed $ENV_FILE"
+fi
+DROPIN="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/hermes-gateway.service.d/pai-hermes.conf"
+if [[ -f "$DROPIN" && ! -L "$DROPIN" ]]; then
+  rm -f "$DROPIN"
+  echo "  removed gateway drop-in $DROPIN"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user is-active --quiet hermes-gateway.service \
+      && systemctl --user restart hermes-gateway.service 2>/dev/null || true
+  fi
+fi
+
 # === 3. Cron job reminder (jobs.json is Hermes-managed) ==================
 cat <<EOF
 

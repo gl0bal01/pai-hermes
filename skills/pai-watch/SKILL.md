@@ -27,7 +27,8 @@ For each repo in `PAI_WATCH_SOURCES` (default 4):
    - `+15` per commit touching critical paths: `src/cli/`, `Algorithm/`, `Pulse/`, `install.sh`, `paths.env`
    - Cap at 100.
 6. If score ≥ `PAI_WATCH_THRESHOLD` (default 10):
-   - Write JSON proposal to `$PAI_PROPOSALS_DIR/<id>.json` (id = `<ISO-ts>-<repo>`).
+   - Ensure the output dir exists (`mkdir -p "$PAI_PROPOSALS_DIR"`), then write the
+     JSON proposal to `$PAI_PROPOSALS_DIR/<id>.json` (id = `<ISO-ts>-<repo>`).
    - Notify via `pai-pulse-send --message "<alert text>"`.
 7. Else log and skip.
 
@@ -81,9 +82,9 @@ done
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `PAI_WATCH_SOURCES` | `"oh-my-claudecode Personal_AI_Infrastructure pai-anywhere pai-review-mode"` | Space-separated repo dir names under `$PAI_PROJET_ROOT` |
-| `PAI_PROJET_ROOT` | `/opt/pai-projet` | Root holding all sub-project clones |
-| `PAI_PROPOSALS_DIR` | `/var/lib/pai-anywhere/proposals` | Output dir |
+| `PAI_WATCH_SOURCES` | `"oh-my-claudecode Personal_AI_Infrastructure pai-anywhere pai-review-mode"` | Space-separated repo dir names under `$PAI_PROJET_ROOT`. `install.sh` narrows this to the repos that actually exist on the host and writes the result to `$HERMES_HOME/pai-hermes.env`. |
+| `PAI_PROJET_ROOT` | `/opt/pai-projet` | Root holding all sub-project clones. The default rarely matches a real host, so `install.sh` auto-detects it (the parent of the pai-hermes checkout) and persists it to `$HERMES_HOME/pai-hermes.env`. |
+| `PAI_PROPOSALS_DIR` | `${XDG_STATE_HOME:-$HOME/.local/state}/pai-hermes/proposals` | Output dir. Defaults under the Hermes user's state dir so the gateway can always write it; created on demand. |
 | `PAI_WATCH_THRESHOLD` | `10` | Min impact score to propose |
 | `PAI_PULSE_URL` | `http://127.0.0.1:31337` | Pulse for notify |
 

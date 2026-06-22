@@ -119,7 +119,7 @@ Exception: `pai-cost-tracker` ships `tools/cost_check.py` because PAI usage cach
 | Claude usage 5h/7d % | PAI canonical | `~/.claude/PAI/MEMORY/STATE/usage-cache.json` |
 | API cost ledger | PAI canonical | `~/.claude/PAI/MEMORY/OBSERVABILITY/anthropic-cost.jsonl` |
 | Sub-project SHA pins | pai-hermes (via pai-accept) | `/etc/pai/paths.env` |
-| Proposals | pai-hermes (via pai-watch) | `/var/lib/pai-anywhere/proposals/*.json` |
+| Proposals | pai-hermes (via pai-watch) | `${XDG_STATE_HOME:-$HOME/.local/state}/pai-hermes/proposals/*.json` |
 | Pulse notify queue | PAI canonical Pulse daemon | `127.0.0.1:31337/notify` |
 | Hermes agent memory | Hermes | `~/.hermes/state.db` |
 | Hermes session FTS5 | Hermes | `~/.hermes/sessions/` |

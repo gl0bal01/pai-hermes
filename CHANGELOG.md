@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`pai-watch` dead on a fresh install**: the skill defaulted `PAI_PROJET_ROOT` to `/opt/pai-projet` (rarely the real clone root) and `PAI_PROPOSALS_DIR` to `/var/lib/pai-anywhere/proposals` (owned by pai-anywhere's `pai` user, so the Hermes gateway — running as the human user — could never write it). Result: the hourly watcher silently no-op'd and proposals were dropped. `PAI_PROPOSALS_DIR` now defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/pai-hermes/proposals` (always gateway-writable, created on demand), and `install.sh` now auto-detects `PAI_PROJET_ROOT` (the parent of the checkout), narrows `PAI_WATCH_SOURCES` to repos that actually exist, writes all three to `$HERMES_HOME/pai-hermes.env`, and wires that as an `EnvironmentFile=` drop-in on the systemd `--user` gateway (printed instructions otherwise). `uninstall.sh` reverses the env file + drop-in. Skill/doc defaults realigned.
+
 ## [0.1.3] — 2026-06-19 — Multi-model review hardening
 
 Addresses a 4-reviewer (codex / deepseek / glm / kimi) audit of 0.1.2.
